@@ -1,0 +1,22 @@
+[
+  {
+    "id": "prod_001",
+    "name": "Dell XPS 15 9530",
+    "brand": "Dell",
+    "category": "laptops",
+    "base_price": 125000,
+    "current_price": 125000,
+    "specs": {
+      "cpu": "Intel Core i7-13700H",
+      "ram_gb": 16,
+      "storage_gb": 512,
+      "display_inches": 15.6,
+      "battery_wh": 86,
+      "weight_kg": 1.86,
+      "gpu": "NVIDIA RTX 4060"
+    },
+    "stock_count": 50,
+    "avg_rating": 4.5,
+    "is_active": true
+  }
+]

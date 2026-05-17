@@ -1,0 +1,57 @@
+version: "3.9"
+
+# Production overrides. Used on EC2 only.
+# Usage: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+
+services:
+  postgres:
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports: []  # Not exposed to host in production — app connects over internal network
+
+  redis:
+    restart: always
+    ports: []
+
+  qdrant:
+    restart: always
+    ports: []
+
+  zookeeper:
+    restart: always
+
+  kafka:
+    restart: always
+    environment:
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_INTERNAL://kafka:29092
+
+  kafka-ui:
+    restart: always
+    ports: []  # Kafka UI not exposed in production — access via SSH tunnel if needed
+
+  app:
+    image: shopsense:latest
+    restart: always
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    depends_on:
+      - postgres
+      - redis
+      - qdrant
+      - kafka
+
+  workers:
+    image: shopsense:latest
+    restart: always
+    command: python workers/run_workers.py
+    env_file:
+      - .env
+    depends_on:
+      - postgres
+      - redis
+      - kafka

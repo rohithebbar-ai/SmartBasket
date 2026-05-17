@@ -52,17 +52,17 @@ def create_app() -> FastAPI:
     from app.auth.router import router as auth_router
     from app.orders.router import router as orders_router
     from app.products.router import router as products_router
+    from app.users.router import router as users_router
 
     app.include_router(auth_router, prefix="/auth", tags=["auth"])
     app.include_router(products_router, prefix="/api/products", tags=["products"])
     app.include_router(orders_router, prefix="/api/orders", tags=["orders"])
+    app.include_router(users_router, prefix="/api/users", tags=["users"])
 
     # Uncomment as each module is implemented:
-    # from app.users.router import router as users_router
     # from app.search.router import router as search_router
     # from app.agent.router import router as agent_router
     # from app.analytics.router import router as analytics_router
-    # app.include_router(users_router, prefix="/api/users", tags=["users"])
     # app.include_router(search_router, prefix="/api/search", tags=["search"])
     # app.include_router(agent_router, prefix="/api/chat", tags=["agent"])
     # app.include_router(analytics_router, prefix="/api/analytics", tags=["analytics"])

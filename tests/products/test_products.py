@@ -154,3 +154,70 @@ def test_update_product_price_works(
     body = response.json()
     assert float(body["current_price"]) == pytest.approx(1199.99)
     assert body["id"] == str(product_id)
+
+
+# ── Auth integration ───────────────────────────────────────────────────────────
+
+def test_list_products_is_public_no_token_required():
+    """GET /api/products/ must work without any Authorization header."""
+    app = create_app()
+
+    async def override_get_db():
+        yield AsyncMock()
+
+    app.dependency_overrides[get_db] = override_get_db
+
+    with TestClient(app, raise_server_exceptions=True) as c:
+        fake_list = ProductListResponse(items=[], total=0, page=1, limit=20, pages=0)
+        with patch("app.products.service.get_products", new_callable=AsyncMock) as mock:
+            mock.return_value = fake_list
+            response = c.get("/api/products/")
+
+    assert response.status_code == 200
+
+
+def test_create_product_without_token_returns_401():
+    """POST /api/products/ with no JWT must return 401."""
+    app = create_app()
+
+    async def override_get_db():
+        yield AsyncMock()
+
+    app.dependency_overrides[get_db] = override_get_db
+
+    with TestClient(app, raise_server_exceptions=True) as c:
+        response = c.post(
+            "/api/products/",
+            json={"name": "Test", "brand": "Test", "base_price": "999"},
+        )
+
+    assert response.status_code == 401
+
+
+def test_create_product_with_customer_token_returns_403():
+    """POST /api/products/ with a customer JWT must return 403."""
+    from app.auth.dependencies import get_current_user, require_admin
+
+    customer = MagicMock(spec=User)
+    customer.id = uuid.uuid4()
+    customer.role = UserRole.CUSTOMER
+    customer.is_active = True
+
+    app = create_app()
+
+    async def override_get_db():
+        yield AsyncMock()
+
+    # Override get_current_user to return a customer; leave require_admin as-is so it fires.
+    app.dependency_overrides[get_current_user] = lambda: customer
+    app.dependency_overrides[get_db] = override_get_db
+
+    with TestClient(app, raise_server_exceptions=True) as c:
+        response = c.post(
+            "/api/products/",
+            headers={"Authorization": "Bearer fake.token.here"},
+            json={"name": "Test", "brand": "Test", "base_price": "999"},
+        )
+
+    assert response.status_code == 403
+    assert "Admin" in response.json()["detail"]

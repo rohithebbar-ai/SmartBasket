@@ -1,28 +1,42 @@
 from datetime import datetime, timedelta, timezone
 
+import bcrypt
+from fastapi import HTTPException, status
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 
 from app.config import settings
 
-_pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+def hash_password(plain_password: str) -> str:
+    return bcrypt.hashpw(plain_password.encode(), bcrypt.gensalt()).decode()
 
 
-def hash_password(plain: str) -> str:
-    return _pwd_context.hash(plain)
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return bcrypt.checkpw(plain_password.encode(), hashed_password.encode())
 
 
-def verify_password(plain: str, hashed: str) -> bool:
-    return _pwd_context.verify(plain, hashed)
-
-
-def create_access_token(user_id: str, role: str, expiry_hours: int | None = None) -> str:
-    hours = expiry_hours if expiry_hours is not None else settings.jwt_expiry_hours
-    expire = datetime.now(timezone.utc) + timedelta(hours=hours)
-    payload = {"user_id": user_id, "role": role, "exp": expire}
+def create_access_token(user_id: str, role: str) -> str:
+    now = datetime.now(timezone.utc)
+    expire = now + timedelta(hours=settings.jwt_expiry_hours)
+    payload = {
+        "sub": user_id,
+        "role": role,
+        "iat": now,
+        "exp": expire,
+    }
     return jwt.encode(payload, settings.app_secret_key, algorithm=settings.jwt_algorithm)
 
 
 def decode_access_token(token: str) -> dict:
-    """Raises JWTError on invalid or expired token."""
-    return jwt.decode(token, settings.app_secret_key, algorithms=[settings.jwt_algorithm])
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, settings.app_secret_key, algorithms=[settings.jwt_algorithm])
+        if payload.get("sub") is None:
+            raise credentials_exception
+        return payload
+    except JWTError:
+        raise credentials_exception

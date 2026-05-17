@@ -18,3 +18,5 @@ CREATE TABLE IF NOT EXISTS nl_sql_audit (
 
 CREATE INDEX IF NOT EXISTS idx_nl_sql_audit_source     ON nl_sql_audit (source);
 CREATE INDEX IF NOT EXISTS idx_nl_sql_audit_created_at ON nl_sql_audit (created_at DESC);
+-- Partial index for failed validations — used to surface bad SQL patterns during review.
+CREATE INDEX IF NOT EXISTS idx_nl_sql_audit_failed     ON nl_sql_audit (created_at DESC) WHERE validation_passed = false;

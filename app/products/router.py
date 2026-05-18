@@ -38,12 +38,24 @@ async def get_product(
     db: AsyncSession = Depends(get_db),
 ) -> ProductDetailResponse:
     """
-    Single product with reviews. Publishes product.viewed Kafka event (Day 6 —
-    Kafka producer not yet wired; event skipped until then).
+    Single product with reviews.
+    Publishes product.viewed to Kafka (demand signal for pricing engine)
+    and increments views:{product_id} in Redis directly as a reliable fallback.
+    Both are dispatched as background tasks so they never delay the response.
     """
+    import asyncio
+    from app.products.kafka import publish_product_viewed
+    from app.search.kafka_consumer import _increment_view
+
     product = await service.get_product_by_id(db, product_id)
     if product is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Product not found")
+
+    # Dispatch fire-and-forget — Kafka publish may hang when broker is down;
+    # wrapping in create_task ensures the response is never blocked.
+    asyncio.create_task(publish_product_viewed(product_id))
+    asyncio.create_task(_increment_view(str(product_id)))
+
     return ProductDetailResponse.model_validate(product)
 
 

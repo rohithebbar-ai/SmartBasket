@@ -6,7 +6,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.database import dispose_engine
-from app.orders.kafka_consumer import start_consumer, stop_consumer
+from app.orders.kafka_consumer import start_consumer as start_orders_consumer
+from app.orders.kafka_consumer import stop_consumer as stop_orders_consumer
+from app.search.kafka_consumer import start_consumer as start_search_consumer
+from app.search.kafka_consumer import stop_consumer as stop_search_consumer
 from app.orders.kafka_producer import close_producer as close_orders_producer
 from app.products.kafka import close_producer as close_products_producer
 from app.redis_client import close_pool, ping
@@ -15,10 +18,12 @@ from app.redis_client import close_pool, ping
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # startup
-    await start_consumer()
+    await start_orders_consumer()
+    await start_search_consumer()
     yield
-    # shutdown — cancel consumer first, then drain producers and pools
-    await stop_consumer()
+    # shutdown — cancel consumers first, then drain producers and pools
+    await stop_orders_consumer()
+    await stop_search_consumer()
     await dispose_engine()
     await close_pool()
     await close_products_producer()
@@ -59,11 +64,12 @@ def create_app() -> FastAPI:
     app.include_router(orders_router, prefix="/api/orders", tags=["orders"])
     app.include_router(users_router, prefix="/api/users", tags=["users"])
 
+    from app.search.router import router as search_router
+    app.include_router(search_router, prefix="/api/search", tags=["search"])
+
     # Uncomment as each module is implemented:
-    # from app.search.router import router as search_router
     # from app.agent.router import router as agent_router
     # from app.analytics.router import router as analytics_router
-    # app.include_router(search_router, prefix="/api/search", tags=["search"])
     # app.include_router(agent_router, prefix="/api/chat", tags=["agent"])
     # app.include_router(analytics_router, prefix="/api/analytics", tags=["analytics"])
 

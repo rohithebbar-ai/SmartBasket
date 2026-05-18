@@ -1,13 +1,11 @@
 """
-Semantic search tests — router, filters, and product.viewed Kafka consumer.
+Search endpoint tests — query routing, semantic path, filters, product.viewed consumer.
 
 Strategy:
-  - Patch embed, search, rerank at the module boundaries they're called from
-    (app.search.router) so no real Jina/Qdrant/flashrank calls are made.
-  - Consumer test calls _increment_view directly with a mocked Redis client
-    to verify the INCR + EXPIRE contract without needing Kafka.
-
-All tests use dependency_overrides for DB/auth where needed.
+  - classify_query is patched at app.search.router for all endpoint tests so no
+    Bedrock or Redis calls are made.
+  - embed, search, rerank are patched at the same module boundary.
+  - Consumer test calls _increment_view directly with a mocked Redis client.
 """
 
 import uuid
@@ -18,10 +16,11 @@ from fastapi.testclient import TestClient
 
 from app.database import get_db
 from app.main import create_app
+from app.schemas.llm import QueryRouterOutput
 from app.schemas.search import ProductResult, SearchResponse
 
 
-# ── Shared fixtures ────────────────────────────────────────────────────────────
+# ── Shared fixtures / helpers ─────────────────────────────────────────────────
 
 def _make_result(
     product_id: str,
@@ -43,6 +42,18 @@ def _make_result(
         relevance_score=relevance_score,
         stock_available=stock_available,
     )
+
+
+def _semantic_routing() -> QueryRouterOutput:
+    return QueryRouterOutput(type="SEMANTIC", reasoning="exploratory discovery")
+
+
+def _analytical_routing() -> QueryRouterOutput:
+    return QueryRouterOutput(type="ANALYTICAL", reasoning="needs aggregation")
+
+
+def _hybrid_routing() -> QueryRouterOutput:
+    return QueryRouterOutput(type="HYBRID", reasoning="semantic + structured filter")
 
 
 _FAKE_VECTOR = [0.1] * 1024
@@ -67,11 +78,71 @@ def client() -> TestClient:
     return TestClient(app, raise_server_exceptions=True)
 
 
-# ── Semantic search — basic ────────────────────────────────────────────────────
+# ── Query routing ─────────────────────────────────────────────────────────────
+
+class TestQueryRouting:
+    def test_semantic_query_proceeds_to_search(self, client: TestClient):
+        with (
+            patch("app.search.router.classify_query", return_value=_semantic_routing()),
+            patch("app.search.router.embed", return_value=_FAKE_VECTOR),
+            patch("app.search.router.search", return_value=_CANDIDATE_POOL[:2]),
+            patch("app.search.router.rerank", return_value=_CANDIDATE_POOL[:2]),
+        ):
+            resp = client.post("/api/search/", json={"query": "laptop for video editing"})
+
+        assert resp.status_code == 200
+        assert resp.json()["query_type"] == "SEMANTIC"
+
+    def test_analytical_query_returns_501(self, client: TestClient):
+        with patch("app.search.router.classify_query", return_value=_analytical_routing()):
+            resp = client.post("/api/search/", json={"query": "which brand has highest ratings"})
+
+        assert resp.status_code == 501
+        body = resp.json()["detail"]
+        assert body["query_type"] == "ANALYTICAL"
+        assert "NL-to-SQL" in body["message"]
+
+    def test_hybrid_query_returns_501(self, client: TestClient):
+        with patch("app.search.router.classify_query", return_value=_hybrid_routing()):
+            resp = client.post("/api/search/", json={"query": "best laptop under 80k with good battery"})
+
+        assert resp.status_code == 501
+        body = resp.json()["detail"]
+        assert body["query_type"] == "HYBRID"
+
+    def test_501_detail_contains_routing_reasoning(self, client: TestClient):
+        with patch("app.search.router.classify_query", return_value=_analytical_routing()):
+            resp = client.post("/api/search/", json={"query": "average price of Dell laptops"})
+
+        detail = resp.json()["detail"]
+        assert detail["reasoning"] == "needs aggregation"
+
+    def test_classify_query_is_called_with_the_query_string(self, client: TestClient):
+        with (
+            patch("app.search.router.classify_query", return_value=_semantic_routing()) as mock_classify,
+            patch("app.search.router.embed", return_value=_FAKE_VECTOR),
+            patch("app.search.router.search", return_value=[]),
+        ):
+            client.post("/api/search/", json={"query": "portable travel laptop"})
+
+        mock_classify.assert_called_once_with("portable travel laptop")
+
+    def test_embed_not_called_for_analytical_query(self, client: TestClient):
+        with (
+            patch("app.search.router.classify_query", return_value=_analytical_routing()),
+            patch("app.search.router.embed") as mock_embed,
+        ):
+            client.post("/api/search/", json={"query": "how many laptops are under 50k"})
+
+        mock_embed.assert_not_called()
+
+
+# ── Semantic search — basic ───────────────────────────────────────────────────
 
 class TestSemanticSearch:
     def test_returns_200_with_results(self, client: TestClient):
         with (
+            patch("app.search.router.classify_query", return_value=_semantic_routing()),
             patch("app.search.router.embed", return_value=_FAKE_VECTOR),
             patch("app.search.router.search", return_value=_CANDIDATE_POOL),
             patch("app.search.router.rerank", return_value=_CANDIDATE_POOL[:3]),
@@ -88,6 +159,7 @@ class TestSemanticSearch:
     def test_result_fields_are_present(self, client: TestClient):
         expected = _CANDIDATE_POOL[:1]
         with (
+            patch("app.search.router.classify_query", return_value=_semantic_routing()),
             patch("app.search.router.embed", return_value=_FAKE_VECTOR),
             patch("app.search.router.search", return_value=expected),
             patch("app.search.router.rerank", return_value=expected),
@@ -103,6 +175,7 @@ class TestSemanticSearch:
 
     def test_empty_qdrant_response_returns_empty_list(self, client: TestClient):
         with (
+            patch("app.search.router.classify_query", return_value=_semantic_routing()),
             patch("app.search.router.embed", return_value=_FAKE_VECTOR),
             patch("app.search.router.search", return_value=[]),
             patch("app.search.router.rerank") as mock_rerank,
@@ -116,6 +189,7 @@ class TestSemanticSearch:
 
     def test_top_k_limits_reranker_output(self, client: TestClient):
         with (
+            patch("app.search.router.classify_query", return_value=_semantic_routing()),
             patch("app.search.router.embed", return_value=_FAKE_VECTOR),
             patch("app.search.router.search", return_value=_CANDIDATE_POOL),
             patch("app.search.router.rerank", return_value=_CANDIDATE_POOL[:2]) as mock_rerank,
@@ -136,6 +210,7 @@ class TestSemanticSearch:
 
     def test_search_passes_query_to_embed(self, client: TestClient):
         with (
+            patch("app.search.router.classify_query", return_value=_semantic_routing()),
             patch("app.search.router.embed", return_value=_FAKE_VECTOR) as mock_embed,
             patch("app.search.router.search", return_value=[]),
         ):
@@ -144,12 +219,12 @@ class TestSemanticSearch:
         mock_embed.assert_called_once_with("thin and light travel laptop")
 
 
-# ── Price filter ───────────────────────────────────────────────────────────────
+# ── Price filter ──────────────────────────────────────────────────────────────
 
 class TestPriceFilter:
     def test_max_price_filter_is_passed_to_qdrant(self, client: TestClient):
-        """search() should receive a non-None filter when max_price is set."""
         with (
+            patch("app.search.router.classify_query", return_value=_semantic_routing()),
             patch("app.search.router.embed", return_value=_FAKE_VECTOR),
             patch("app.search.router.search", return_value=[]) as mock_search,
         ):
@@ -158,13 +233,12 @@ class TestPriceFilter:
                 json={"query": "budget laptop", "filters": {"max_price": 800.0}},
             )
 
-        _, kwargs = mock_search.call_args
-        qdrant_filter = mock_search.call_args[0][1]  # positional arg
+        qdrant_filter = mock_search.call_args[0][1]
         assert qdrant_filter is not None
 
     def test_no_filter_passes_none_to_qdrant(self, client: TestClient):
-        """search() should receive None filter when no filters are specified."""
         with (
+            patch("app.search.router.classify_query", return_value=_semantic_routing()),
             patch("app.search.router.embed", return_value=_FAKE_VECTOR),
             patch("app.search.router.search", return_value=[]) as mock_search,
         ):
@@ -174,12 +248,9 @@ class TestPriceFilter:
         assert qdrant_filter is None
 
     def test_max_price_filter_reduces_result_set(self, client: TestClient):
-        """
-        Simulate Qdrant honouring the filter by returning only results <= 1300.
-        The router must pass those through without further price filtering.
-        """
         under_1300 = [r for r in _CANDIDATE_POOL if r.current_price <= 1300.0]
         with (
+            patch("app.search.router.classify_query", return_value=_semantic_routing()),
             patch("app.search.router.embed", return_value=_FAKE_VECTOR),
             patch("app.search.router.search", return_value=under_1300),
             patch("app.search.router.rerank", return_value=under_1300),
@@ -195,6 +266,7 @@ class TestPriceFilter:
 
     def test_brand_filter_is_passed_to_qdrant(self, client: TestClient):
         with (
+            patch("app.search.router.classify_query", return_value=_semantic_routing()),
             patch("app.search.router.embed", return_value=_FAKE_VECTOR),
             patch("app.search.router.search", return_value=[]) as mock_search,
         ):
@@ -208,6 +280,7 @@ class TestPriceFilter:
 
     def test_in_stock_only_filter_builds_filter_object(self, client: TestClient):
         with (
+            patch("app.search.router.classify_query", return_value=_semantic_routing()),
             patch("app.search.router.embed", return_value=_FAKE_VECTOR),
             patch("app.search.router.search", return_value=[]) as mock_search,
         ):
@@ -221,6 +294,7 @@ class TestPriceFilter:
 
     def test_combined_filters_build_single_filter_object(self, client: TestClient):
         with (
+            patch("app.search.router.classify_query", return_value=_semantic_routing()),
             patch("app.search.router.embed", return_value=_FAKE_VECTOR),
             patch("app.search.router.search", return_value=[]) as mock_search,
         ):
@@ -237,7 +311,6 @@ class TestPriceFilter:
             )
 
         qdrant_filter = mock_search.call_args[0][1]
-        # Filter is built with 3 must-conditions
         assert qdrant_filter is not None
         assert len(qdrant_filter.must) == 3
 
@@ -294,5 +367,4 @@ class TestProductViewedConsumer:
             await _increment_view("hot-product")
 
         assert redis.incr.await_count == 3
-        # expire resets TTL on every view (sliding window)
         assert redis.expire.await_count == 3

@@ -1,10 +1,27 @@
-# All LLM prompts centralised here — implement in Week 3 (Days 12–13).
+# All LLM prompts centralised here.
 # Version each prompt with a comment when modified; track alongside model version.
-#
-# Prompts to define (see platform plan Section 9 for full text):
-#   INTENT_CLASSIFICATION_PROMPT   — Haiku; returns intent JSON
-#   QUERY_ROUTER_PROMPT            — Haiku; returns {"type": "SEMANTIC|ANALYTICAL|HYBRID"}
-#   FILTER_EXTRACTION_PROMPT       — Haiku; returns structured filter JSON from query
-#   NL_TO_SQL_PROMPT               — Haiku; schema-aware, SELECT-only enforcement
-#   RESPONSE_SYNTHESIS_PROMPT      — Sonnet; adapts tone to retrieval method
-#   ASPECT_SENTIMENT_PROMPT        — Sonnet; batch ingestion only, returns five sentiment floats
+
+# ── Query Router ──────────────────────────────────────────────────────────────
+# v1 — 2026-05-18 — Haiku; ~150ms; returns {"type": "SEMANTIC|ANALYTICAL|HYBRID", "reasoning": "..."}
+
+QUERY_ROUTER_PROMPT = """Classify this shopping query into exactly one category.
+
+Categories:
+- SEMANTIC: Discovery query, exploratory, needs meaning not structure.
+  Examples: "laptop for video editing", "something portable for travel",
+  "what do you recommend for a developer", "good gaming laptop"
+
+- ANALYTICAL: Structured data question, needs exact numbers or aggregations.
+  Examples: "which brand has highest ratings", "show out of stock products",
+  "average price of Dell laptops", "products with most price changes this week",
+  "how many laptops are under 50k"
+
+- HYBRID: Needs both semantic understanding AND structured filters.
+  Examples: "best reviewed laptop under 80k with good battery",
+  "top rated Dell products for video editing",
+  "affordable options with high display ratings"
+
+Query: {query}
+
+Respond with JSON only — no markdown, no explanation outside the JSON:
+{{"type": "SEMANTIC", "reasoning": "exploratory discovery, no structured constraints"}}"""

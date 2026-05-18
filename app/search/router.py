@@ -1,29 +1,33 @@
 """
-Search router — pure semantic path (no LLM query routing).
+Search router — query-routed search endpoint.
 
 POST /api/search/
-    Embeds the query → searches Qdrant (top 20) → reranks with flashrank → returns top 10.
+    1. Classify query as SEMANTIC | ANALYTICAL | HYBRID (Bedrock Haiku, ~150ms, Redis-cached).
+    2. SEMANTIC  → embed → Qdrant top-20 → flashrank rerank → return top_k.
+    3. ANALYTICAL / HYBRID → 501 Not Implemented (NL-to-SQL engine lands on Day 10/11).
 
-All three underlying operations (embed, Qdrant search, flashrank rerank) use
-synchronous libraries.  Each is dispatched to the default thread-pool executor
-via asyncio.to_thread so the FastAPI event loop is never blocked.
+All three underlying search operations (embed, Qdrant, flashrank) use
+synchronous libraries dispatched via asyncio.to_thread so the event loop is
+never blocked.
 
-Filters in the request body are optional.  When provided they are translated to
-Qdrant Filter objects and applied as pre-filters before vector search, which is
-more accurate than post-filtering on large collections.
+Filters in the request body are optional pre-filters applied inside Qdrant
+before vector search (more accurate than post-filtering on large collections).
 """
 
 import asyncio
+import logging
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
 from qdrant_client.models import FieldCondition, Filter, MatchValue, Range
 
 from app.schemas.search import SearchResponse
 from app.search.embedder import embed
 from app.search.qdrant_ops import search
+from app.search.query_router import classify_query
 from app.search.reranker import rerank
 
+log = logging.getLogger(__name__)
 router = APIRouter()
 
 
@@ -68,17 +72,29 @@ def _build_qdrant_filter(f: SearchFilters) -> Filter | None:
 
 # ── Endpoint ──────────────────────────────────────────────────────────────────
 
-@router.post("/", response_model=SearchResponse, summary="Semantic product search")
-async def semantic_search(body: SearchRequest) -> SearchResponse:
+@router.post("/", response_model=SearchResponse, summary="Product search")
+async def product_search(body: SearchRequest) -> SearchResponse:
     """
-    Pure semantic search path — no LLM involved.
+    1. Classify query type (SEMANTIC | ANALYTICAL | HYBRID) via Bedrock Haiku.
+    2. SEMANTIC: embed → Qdrant → rerank → return results.
+    3. ANALYTICAL / HYBRID: 501 until NL-to-SQL engine is available (Day 10/11).
+    """
+    routing = await classify_query(body.query)
+    log.info("Search routing: query_type=%s query='%.80s'", routing.type, body.query)
 
-    1. Embed query via Jina/NVIDIA (cached by embedder.embed)
-    2. Pre-filter + vector search in Qdrant (top 20 candidates)
-    3. Rerank with flashrank cross-encoder (top_k results)
-    4. Return SearchResponse with scores
-    """
-    # All three calls are sync I/O or CPU — run in thread pool
+    if routing.type != "SEMANTIC":
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail={
+                "query_type": routing.type,
+                "reasoning": routing.reasoning,
+                "message": (
+                    f"{routing.type} queries require the NL-to-SQL engine "
+                    "(available from Day 10). Try a descriptive product query instead."
+                ),
+            },
+        )
+
     vector = await asyncio.to_thread(embed, body.query)
 
     qdrant_filter = _build_qdrant_filter(body.filters)

@@ -1,22 +1,53 @@
-# ShopSense — AI-Native Product Discovery Platform
+# ShopSense
 
-> A production-grade e-commerce search and discovery platform that replaces keyword search with semantic understanding, adds a conversational AI agent, and uses real-time demand signals to adjust prices dynamically.
+**AI-native product discovery for consumer electronics.**
+
+ShopSense is a production-grade e-commerce platform that replaces keyword search with genuine semantic understanding. A customer types *"laptop for video editing under ₹80K that is light for travel"* and receives a personalised, reasoned comparison — not a list of keyword matches. An admin types *"which brand has the highest average rating this month?"* and gets an answer drawn from live data, not a dashboard they have to navigate themselves.
 
 **Built by Rohit Hebbar · May 2026 · Active Development**
 
 ---
 
-## What is ShopSense?
+## What ShopSense does well
 
-ShopSense is what Amazon Rufus looks like built from scratch — an AI-native product discovery platform for consumer electronics. A customer types *"laptop for video editing under ₹80K that is light for travel"* and receives a personalised, reasoned comparison — not a list of keyword matches.
+**It understands what you mean, not just what you typed.**
+Traditional search fails the moment a customer's words do not match the product title. ShopSense embeds every product — its name, specs, and the most useful things real reviewers said about it — into a semantic vector space. Queries are matched by meaning. A search for "something for creators who travel light" finds the right ultrabooks even if none of them are described as "for creators who travel light" in their listing.
 
-| Problem | Before ShopSense | After ShopSense |
-|---|---|---|
-| Keyword mismatch | "laptop for video editing" → 0 results | Semantic search understands intent |
-| No structured analytics | Admin cannot query data in plain English | NL-to-SQL answers "which brand has the highest rating?" |
-| No reasoning | Star ratings hide what's actually wrong | Aspect-based sentiment extracts feature signals from reviews |
-| No personalisation | Same results for every user | Kafka event stream builds real-time preference profiles |
-| Static pricing | Price set once, never adjusts | Dynamic pricing engine reads demand signals every 2 minutes |
+**It knows the difference between a discovery question and a data question.**
+Not every query benefits from semantic search. "Which brand has the highest average battery rating?" is a data question — it has a precise, deterministic answer in the database. Sending it through a vector search returns a ranked list of products when what the customer actually wanted was a single number. ShopSense classifies every query before retrieval and routes it to the right engine: vector search for intent-driven discovery, SQL for structured analytics, and a hybrid path — SQL constrains the candidate set, vectors rank within it — for queries that need both.
+
+**It builds a picture of each user without asking them anything.**
+Every product view, cart addition, and completed order flows through a Kafka event stream into a personalisation worker that continuously updates each user's preference profile — preferred brands, typical price range, feature priorities. The conversational agent reads this profile before generating any response. A user who has browsed Apple products twice and bought one sees different recommendations than a user who has only looked at budget Windows laptops. Neither user was asked to fill out a preference form.
+
+**Prices respond to demand in real time.**
+A background pricing engine reads a 24-hour demand counter maintained in Redis — incremented by every product view event from Kafka — and adjusts prices every two minutes according to configurable rules. High demand and low stock pushes a price up. High abandonment and surplus stock brings it down. Cart totals update automatically when a price changes, because the order module listens to the `price.updated` Kafka topic and recalculates.
+
+**The admin can query the entire catalogue in plain English.**
+The analytics module exposes an NL-to-SQL endpoint. An admin types a question, Bedrock Claude Haiku translates it into schema-aware SQL, the query runs against PostgreSQL, and the result comes back as structured data with a one-sentence interpretation. Every query is logged to an audit table that doubles as a fine-tuning dataset for improving SQL generation accuracy over time.
+
+---
+
+## How a customer uses it
+
+A customer arrives at the storefront and sees a product grid — real laptops with real specs, real ratings, and real prices that may have changed minutes ago based on demand. They can browse and filter exactly as they would on any e-commerce site.
+
+When they have something specific in mind, they use the search bar. They type in plain language — a use case, a budget, a constraint — and get semantically ranked results within a second. No keywords required. The results page shows why each product ranked where it did: a sentiment bar for battery life, display quality, build quality, and the other dimensions that matter.
+
+When they want a conversation, they open the ShopSense chat widget. The agent already knows their browsing history from the current session. It classifies their intent — are they discovering, comparing, or ready to buy? — and routes to the right retrieval path. For a discovery question it searches semantically. For a comparison it fetches the specific products and explains the trade-offs. For a question like "is this a good time to buy?" it checks the price history table and tells the customer whether the current price is high or low relative to recent weeks.
+
+When the customer decides, the agent handles the entire checkout without them leaving the conversation. It confirms the product and price, surfaces compatible accessories bought alongside it by other customers, checks their saved payment methods, presents an itemised bill, and waits for an explicit confirmation before processing the payment. After the order is placed it sends a receipt email and tells the customer when to expect delivery.
+
+After delivery, the agent follows up. It asks for a quick rating and a few words about the product — making review collection a natural part of the conversation rather than a separate email campaign. Those reviews flow back into the sentiment pipeline and improve future recommendations.
+
+---
+
+## How the admin uses it
+
+The admin interacts with ShopSense through two surfaces: a dashboard powered by NL-to-SQL, and the same conversational agent available to customers but with elevated permissions.
+
+From the dashboard, the admin asks questions in plain English. Which products are running low on stock? What was the average order value last week? Which search queries returned zero results? The answers come from live data, not from a reporting tool that someone configured months ago and has not been updated since.
+
+Through the agent, the admin takes actions. They can update stock counts, create time-limited discounts, adjust pricing rules, and query sales performance — all in natural language, all with a confirmation step before any write operation executes. The agent explains what it is about to do and waits for approval.
 
 ---
 
@@ -26,17 +57,15 @@ ShopSense is what Amazon Rufus looks like built from scratch — an AI-native pr
 
 ![High Level System Architecture](assets/high_level_system_architecture.png)
 
-A **modular monolith** — one FastAPI app, one EC2 instance, one `terraform apply`. Modules have clean boundaries (`products/`, `orders/`, `search/`, `agent/`, `analytics/`) but share the same process, database, and deployment unit. This is a deliberate choice: microservices add two weeks of infrastructure overhead with zero user-facing benefit at this scale.
-
 ### Retrieval Architecture
 
 ![Retrieval Architecture](assets/retrieval_architecture.png)
 
 Every query is classified before retrieval:
 
-- **SEMANTIC** → Jina v3 embeddings → Qdrant vector search → flashrank reranker
-- **ANALYTICAL** → Bedrock Claude Haiku → schema-aware SQL → PostgreSQL
-- **HYBRID** → SQL constrains the candidate set, vector search ranks within it
+* **SEMANTIC** → Jina v3 embeddings → Qdrant vector search → flashrank reranker
+* **ANALYTICAL** → Bedrock Claude Haiku → schema-aware SQL → PostgreSQL
+* **HYBRID** → SQL constrains the candidate set, vector search ranks within it
 
 The query router (Bedrock Haiku, ~150ms) makes this decision. This is the correct architecture — vector search alone cannot answer "which brand has the highest average rating?", and SQL alone cannot capture "laptop that feels premium".
 
@@ -46,88 +75,61 @@ The query router (Bedrock Haiku, ~150ms) makes this decision. This is the correc
 
 Five Kafka topics wire the system together:
 
-| Topic | Producer | Consumers |
-|---|---|---|
-| `product.viewed` | products module | search module (Redis demand counter), personalisation worker |
-| `product.created` | products module | embedding worker |
-| `cart.updated` | orders module | personalisation worker |
-| `order.created` | orders module | personalisation worker (highest weight signal) |
-| `price.updated` | pricing engine | orders module (recalculates active cart totals) |
+| Topic               | Producer        | Consumers                                                    |
+| ------------------- | --------------- | ------------------------------------------------------------ |
+| `product.viewed`  | products module | search module (Redis demand counter), personalisation worker |
+| `product.created` | products module | embedding worker                                             |
+| `cart.updated`    | orders module   | personalisation worker                                       |
+| `order.created`   | orders module   | personalisation worker (highest weight signal)               |
+| `price.updated`   | pricing engine  | orders module (recalculates active cart totals)              |
 
 ---
 
 ## Tech Stack
 
-| Layer | Technology | Why |
-|---|---|---|
-| **API** | FastAPI + Python 3.11 | Async, typed, fast |
-| **LLM** | Amazon Bedrock (Claude Sonnet 4.5 / Haiku 4.5) | No API key management, eu-north-1 inference profiles |
-| **Embeddings** | Jina v3 (`jina-embeddings-v3`) | 1024-dim, task-aware query/passage modes, best retrieval quality |
-| **Vector DB** | Qdrant Cloud | Cosine similarity, metadata payload filtering |
-| **Database** | PostgreSQL (Supabase) | Products, orders, users, reviews, price history |
-| **Cache** | Redis | Cart state (7d TTL), price cache (10min), demand counters |
-| **Event Bus** | Apache Kafka (Docker) | Decoupled demand signals, price recalculation |
-| **ORM** | SQLAlchemy 2.0 async | Mapped columns, selectinload |
-| **Auth** | JWT (HS256) + bcrypt | Stateless, role-aware (customer / admin) |
-| **Reranker** | flashrank | Local cross-encoder, no API cost |
-| **Agent** | LangGraph | Stateful multi-node workflow, streaming |
-| **Infra** | Terraform + AWS EC2 | Reproducible, free-tier deployable |
-| **Observability** | LangSmith | Full agent trace per conversation |
+| Layer         | Technology                                     | Why                                                                                         |
+| ------------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| API           | FastAPI + Python 3.11                          | Async, typed, fast                                                                          |
+| LLM           | Amazon Bedrock (Claude Sonnet 4.5 / Haiku 4.5) | IAM auth, no key rotation, eu-north-1 inference profiles                                    |
+| Embeddings    | Jina v3 (`jina-embeddings-v3`)               | 1024-dim, separate query/passage task modes, best retrieval quality in three-way smoke test |
+| Vector DB     | Qdrant Cloud                                   | Cosine similarity with metadata payload filtering                                           |
+| Database      | PostgreSQL via Supabase                        | Products, orders, users, reviews, price history, NL-to-SQL audit log                        |
+| Cache         | Redis                                          | Cart state (7-day TTL), live price cache (10-min TTL), demand counters (24-hour TTL)        |
+| Event bus     | Apache Kafka                                   | Decoupled demand signals, real-time price recalculation, personalisation updates            |
+| ORM           | SQLAlchemy 2.0 async                           | Mapped columns, async session                                                               |
+| Auth          | JWT HS256 + bcrypt                             | Stateless, role-aware (customer / admin)                                                    |
+| Reranker      | flashrank                                      | Local cross-encoder, no API cost                                                            |
+| Agent         | LangGraph                                      | Stateful multi-node graph, streaming SSE                                                    |
+| Infra         | Terraform + AWS EC2                            | Reproducible, free-tier deployable                                                          |
+| Observability | LangSmith                                      | Full agent trace per conversation                                                           |
 
 ---
 
 ## Data Pipeline
 
-**21,173 real laptop products** sourced from Amazon product metadata + Kaggle datasets, deduplicated by name, and enriched with:
+**21,173 real laptop products** sourced from Amazon product metadata and Kaggle datasets, deduplicated by name and enriched through a multi-stage pipeline.
 
-- **129,765 reviews** — streamed from McAuley Lab Amazon Reviews 2023 dataset (2M rows) + synthetic fill via Faker
-- **1,503 products sentiment-scored** — Bedrock Haiku extracts 7 aspect sentiment scores (`battery`, `display`, `build_quality`, `value`, `performance`, `keyboard`, `thermal`) + `top_complaint` + `top_praise` per product
-- **1,503 products embedded** — Jina v3 1024-dim vectors upserted to Qdrant Cloud with full metadata payload
+**129,765 reviews** streamed from the McAuley Lab Amazon Reviews 2023 dataset and matched to products via fuzzy name matching. Unmatched products receive synthetic reviews generated with Faker.
 
-```
-data/ingestion/
-├── process_amazon_products.py   # Streams and upserts Amazon metadata
-├── process_kaggle_laptops.py    # Kaggle laptop dataset ingestion
-├── fetch_amazon_reviews.py      # Streams 2M reviews, fuzzy-matches to products
-├── sync_local_from_supabase.py  # UUID alignment between local and Supabase
-├── run_sentiment.py             # Bedrock Haiku batch sentiment extraction
-├── generate_embeddings.py       # Jina v3 embeddings → Qdrant Cloud
-├── smoke_test_embeddings.py     # 3-way embedding provider comparison
-└── verify_ingestion.py          # 10-query semantic quality gate
-```
+**1,503 products sentiment-scored** via Bedrock Claude Haiku. Each product receives seven aspect sentiment scores — battery, display, build quality, value, performance, keyboard, thermal — plus a `top_complaint` and `top_praise` extracted from its reviews. Scores are stored on the products table and feed directly into the Qdrant payload, the recommendation logic, and the sentiment bars shown on product pages.
+
+**1,503 products embedded** with Jina v3 at 1024 dimensions and upserted to Qdrant Cloud with full metadata payload. Remaining products are embedded on demand when first viewed, via a lazy scoring worker that queues the embedding job in Redis without blocking the product page response.
+
+Provider selection rationale: three-way smoke test across Jina, NVIDIA, and Bedrock Titan Embeddings on ten representative queries. Jina was the only provider to rank both expected results in the top two for the "lightweight travel" query. Its separate `retrieval.query` and `retrieval.passage` task modes provide a structural advantage for asymmetric retrieval — short natural language queries against long product descriptions.
 
 ---
 
-## Project Structure
+## Key Design Decisions
 
-```
-shopsense/
-├── app/
-│   ├── main.py                  # FastAPI factory, lifespan events
-│   ├── config.py                # Pydantic settings (single source of truth)
-│   ├── database.py              # SQLAlchemy async engine
-│   ├── redis_client.py          # Shared connection pool
-│   ├── auth/                    # JWT auth, bcrypt, get_current_user, require_admin
-│   ├── products/                # Catalogue CRUD, Kafka producer
-│   ├── orders/                  # Cart (Redis), orders (PostgreSQL), Kafka consumer
-│   ├── users/                   # UserPreferences — written by worker, read by agent
-│   ├── search/                  # Embedder, Qdrant ops, query router, NL-to-SQL, pricing
-│   ├── agent/                   # LangGraph graph, all nodes, streaming /chat SSE
-│   ├── analytics/               # Admin NL-to-SQL BI endpoints
-│   ├── schemas/                 # Shared Pydantic schemas for all LLM boundaries
-│   └── mcp/                     # MCP server (port 8006), checkout tool
-├── workers/
-│   ├── pricing_engine.py        # 120s cycle, demand signals → price adjustments
-│   └── personalisation.py       # Kafka consumer → UserPreferences updates
-├── data/ingestion/              # One-time data pipeline scripts
-├── database/migrations/         # Raw SQL migrations (numbered)
-├── supabase/migrations/         # Supabase CLI migrations
-├── tests/                       # pytest, module-per-module
-├── terraform/                   # EC2, security groups, Elastic IP, S3 state
-├── assets/                      # Architecture diagrams
-├── docker-compose.yml           # Kafka, Redis, PostgreSQL, Kafka UI, Qdrant
-└── pyproject.toml               # uv-managed dependencies
-```
+**Modular monolith over microservices.** One person, unstable domain boundaries, no scaling problem yet. Microservices would add two weeks of infrastructure overhead with no user-facing benefit at this stage. The modules have clean internal boundaries and can be extracted into independent services later when a specific scaling problem justifies it.
+
+**Vectorless RAG for analytical queries.** The NL-to-SQL path is Vectorless RAG — the LLM decomposes the query into structured SQL filters, the database returns deterministic results, no embeddings involved. This is the right approach for questions where precision matters more than semantic similarity. Vector search is reserved for discovery queries where intent cannot be expressed as a structured filter.
+
+**Bedrock over third-party LLM APIs.** IAM-based authentication means no API key rotation, no rate limit surprises that differ between environments, and automatic cross-region redundancy via inference profile IDs (`eu.anthropic.*`). The same IAM role that accesses EC2 accesses Bedrock — one authentication model for the entire system.
+
+**JSONB for cart and order items.** Cart state lives in Redis, not a database table. Order items are JSONB snapshots — the price at checkout is captured permanently regardless of future schema migrations or price changes. This is preferable to a separate `order_items` table because the snapshot semantics are explicit in the data model.
+
+**Human-in-the-loop before every write in the agent.** The checkout agent proposes every action — add to cart, apply coupon, process payment — and waits for an unambiguous confirmation before executing. Ambiguous responses trigger clarification. Only a clear affirmative triggers a write. This is an architectural constraint, not a safety feature bolted on after the fact.
 
 ---
 
@@ -135,34 +137,47 @@ shopsense/
 
 ### Prerequisites
 
-- Python 3.11+
-- Docker + Docker Compose
-- [`uv`](https://github.com/astral-sh/uv) — `pip install uv`
-- AWS account with Bedrock access (eu-north-1)
-- Jina API key — [jina.ai](https://jina.ai) (free tier, no credit card)
-- Supabase project — [supabase.com](https://supabase.com) (free tier)
-- Qdrant Cloud cluster — [cloud.qdrant.io](https://cloud.qdrant.io) (free tier)
+* Python 3.11+, Docker + Docker Compose, [`uv`](https://github.com/astral-sh/uv)
+* AWS account with Bedrock access in eu-north-1
+* Jina API key — [jina.ai](https://jina.ai/) (free tier)
+* Supabase project — [supabase.com](https://supabase.com/) (free tier)
+* Qdrant Cloud cluster — [cloud.qdrant.io](https://cloud.qdrant.io/) (free tier)
 
-### 1. Clone and install
+### Setup
 
 ```bash
 git clone https://github.com/your-username/shopsense.git
 cd shopsense
-make install          # uv sync --extra dev
-```
 
-### 2. Configure environment
+# Install dependencies
+make install
 
-```bash
+# Configure environment
 cp .env.example .env
-# Fill in: DATABASE_URL, JINA_API_KEY, AWS_REGION, QDRANT_URL, QDRANT_API_KEY
+# Fill in: DATABASE_URL, JINA_API_KEY, AWS_REGION, QDRANT_URL, QDRANT_API_KEY, APP_SECRET_KEY
+
+# Start infrastructure
+make dev
+# PostgreSQL · Redis · Kafka · Kafka UI (localhost:8080) · Qdrant
+
+# Apply migrations
+supabase db push
+
+# Run the data pipeline
+make ingest
+
+# Start the API
+make run
+# API:      http://localhost:8000
+# Docs:     http://localhost:8000/docs
+# Kafka UI: http://localhost:8080
 ```
 
-Key variables:
+### Environment Variables
 
 ```env
-DATABASE_URL=postgresql+asyncpg://...       # Supabase connection string
-MIRROR_DATABASE_URL=postgresql+asyncpg://... # Local Docker postgres (ingestion only)
+DATABASE_URL=postgresql+asyncpg://...
+MIRROR_DATABASE_URL=postgresql+asyncpg://...   # Local Docker postgres, ingestion only
 JINA_API_KEY=jina_...
 AWS_REGION=eu-north-1
 BEDROCK_GENERATION_MODEL_ID=eu.anthropic.claude-sonnet-4-5-20250929-v1:0
@@ -172,124 +187,79 @@ QDRANT_API_KEY=...
 APP_SECRET_KEY=...    # openssl rand -hex 32
 ```
 
-### 3. Start infrastructure
+### Running Tests
 
 ```bash
-make dev
-# Starts: PostgreSQL, Redis, Kafka, Kafka UI (localhost:8080), Qdrant
-```
-
-### 4. Run migrations
-
-```bash
-# Apply to Supabase via the SQL editor, or:
-supabase db push
-```
-
-### 5. Run the data pipeline
-
-```bash
-make ingest
-# Or individually:
-uv run python data/ingestion/process_amazon_products.py
-uv run python data/ingestion/fetch_amazon_reviews.py
-uv run python data/ingestion/run_sentiment.py --limit 1500
-uv run python data/ingestion/generate_embeddings.py
-uv run python data/ingestion/verify_ingestion.py   # quality gate
-```
-
-### 6. Start the API
-
-```bash
-make dev
-# API: http://localhost:8000
-# Docs: http://localhost:8000/docs
-# Kafka UI: http://localhost:8080
+make test                               # Full suite with coverage
+make test-module module=orders          # Scope to one module
 ```
 
 ---
 
-## API Overview
+## Project Structure
+
+```
+shopsense/
+├── app/
+│   ├── auth/           # JWT, bcrypt, get_current_user, require_admin
+│   ├── products/       # Catalogue CRUD, Kafka producer
+│   ├── orders/         # Cart (Redis), orders (PostgreSQL), Kafka consumer
+│   ├── users/          # UserPreferences — written by worker, read by agent
+│   ├── search/         # Embedder, Qdrant, query router, NL-to-SQL, pricing engine
+│   ├── agent/          # LangGraph graph, all nodes, streaming /chat endpoint
+│   ├── analytics/      # Admin NL-to-SQL endpoints
+│   ├── mcp/            # MCP server (port 8006), checkout tools
+│   └── schemas/        # Shared Pydantic schemas at LLM boundaries
+├── workers/
+│   ├── pricing_engine.py       # 120-second cycle, demand → price adjustments
+│   └── personalisation.py      # Kafka consumer → UserPreferences updates
+├── data/ingestion/             # One-time data pipeline scripts
+├── database/migrations/        # Numbered SQL migration files
+├── tests/                      # pytest, mirrored module structure
+├── terraform/                  # EC2, security groups, Elastic IP, S3 state backend
+└── docker-compose.yml          # Full local stack
+```
+
+---
+
+## API Reference
 
 ### Auth
+
 ```
-POST /auth/register          # Create account
-POST /auth/login             # Returns JWT
-GET  /auth/me                # Current user
+POST /auth/register        Register a new account
+POST /auth/login           Authenticate and return JWT
+GET  /auth/me              Current authenticated user
 ```
 
 ### Products
-```
-GET  /api/products           # Paginated list with filters
-GET  /api/products/{id}      # Detail + reviews + fires product.viewed
-POST /api/products           # Admin: create product
-```
 
-### Orders & Cart
 ```
-POST   /api/orders/cart/add         # Add to cart (reads live Redis price)
-DELETE /api/orders/cart/remove      # Remove item
-GET    /api/orders/cart/{user_id}   # View cart
-POST   /api/orders/orders           # Checkout → order.created event
-GET    /api/orders/orders/{id}      # Order detail
+GET  /api/products         Paginated catalogue with filters
+GET  /api/products/{id}    Product detail, reviews, fires product.viewed event
+POST /api/products         Admin: create product
 ```
 
-### Search & Agent (Days 9–14)
+### Orders
+
 ```
-POST /api/search             # Semantic / analytical / hybrid search
-POST /api/chat               # Streaming conversational agent (SSE)
-GET  /api/analytics/query    # Admin NL-to-SQL BI queries
-```
-
----
-
-## Build Roadmap
-
-| Day | Module | Status |
-|-----|--------|--------|
-| 1 | Docker Compose stack | ✅ Done |
-| 2 | `auth/` — JWT, bcrypt, dependencies | ✅ Done |
-| 3 | `products/` — catalogue CRUD, Kafka producer, seed data | ✅ Done |
-| 4 | Data ingestion — 21k products, 130k reviews, sentiment | ✅ Done |
-| 5 | `orders/` — cart (Redis), orders (PostgreSQL), Kafka consumer | ✅ Done |
-| 6 | `users/` — UserPreferences | 🔜 Next |
-| 7 | Semantic search — Qdrant ops, embedder, flashrank | 🔜 |
-| 8 | Query router — SEMANTIC / ANALYTICAL / HYBRID | 🔜 |
-| 9 | NL-to-SQL engine | 🔜 |
-| 10 | Hybrid search | 🔜 |
-| 11–12 | LangGraph agent + all nodes | 🔜 |
-| 13 | Pricing engine + personalisation worker | 🔜 |
-| 14–15 | React frontend + admin analytics | 🔜 |
-| 16 | Terraform + EC2 deploy | 🔜 |
-
----
-
-## Tests
-
-```bash
-make test                              # All tests with coverage
-make test-module module=orders         # Scope to one module
-.venv/bin/python -m pytest tests/orders/test_orders.py -v --no-cov
+POST   /api/orders/cart/add          Add item — reads live price from Redis
+DELETE /api/orders/cart/remove       Remove item
+GET    /api/orders/cart/{user_id}    Current cart with live totals
+POST   /api/orders/orders            Checkout — publishes order.created
+GET    /api/orders/orders/{id}       Order detail
 ```
 
-Test coverage targets per module:
-- **auth**: register, login, JWT validation, admin guard
-- **orders**: cart add/remove, price Redis fallback, order creation, Kafka publish, price.updated consumer
+### Search and Agent
 
----
-
-## Key Design Decisions
-
-**Why modular monolith?** One person, unstable domain boundaries, zero scaling problem yet. Microservices would add two weeks of infrastructure work with no user-facing benefit. The monolith can be split later when a specific module needs independent scaling.
-
-**Why Jina v3 over NVIDIA / Bedrock Titan?** Three-way smoke test across 10 queries — Jina was the only provider to rank both expected results in the top 2 for the "lightweight travel" query. Its separate `retrieval.query` / `retrieval.passage` task modes give it a structural advantage for asymmetric retrieval (short query vs long product description).
-
-**Why Bedrock over OpenAI?** No API key rotation, no rate limit surprises, IAM-based access control, runs in eu-north-1 to match the data residency of other services. Inference profile IDs (`eu.anthropic.*`) enable cross-region redundancy automatically.
-
-**Why JSONB for cart and order items?** Cart is ephemeral state (Redis hash) — no schema needed. Order items are append-only snapshots — the price at checkout must never change regardless of future schema migrations, which makes JSONB with a defined shape the right call over a separate `order_items` table.
+```
+POST /api/search           Semantic · analytical · hybrid retrieval
+POST /api/chat             Streaming conversational agent (SSE)
+POST /api/analytics/query  Admin NL-to-SQL — plain English → live data
+```
 
 ---
 
 ## License
 
-MIT — see [LICENSE](LICENSE)
+MIT

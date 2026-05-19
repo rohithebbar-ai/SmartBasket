@@ -1473,9 +1473,125 @@ This section maps every component of ShopSense to what it teaches you about GenA
 
 ---
 
+## 21. Architectural Improvements — Phased Plan
+
+Decisions made after the initial build. Grouped by when they will be implemented.
+
+---
+
+### 21.1 Phase 1 — Implement Before Deployment (During Active Build)
+
+#### Pricing Engine — Demand-Score Model (replaces threshold rule)
+
+**Problem with current design:** `if views > 50: price * 1.05` is a hardcoded threshold rule. It ignores that 30 views in a low-traffic category is more significant than 30 views in a high-traffic one.
+
+**Replacement — two-phase model:**
+
+Phase A (now): normalised demand score:
+```python
+demand_score = views_last_24h / avg_views_for_category
+multiplier = clip(1.0 + elasticity_coef * (demand_score - 1.0), 0.80, 1.30)
+```
+
+Phase B (after data accumulates): fit real price elasticity from `price_history`. Once 10+ price changes per product exist, run OLS regression `log(views_delta) ~ log(price_delta)`. The coefficient IS the elasticity. The `price_history` table already collects the data needed — it just needs to be queried after a few pricing cycles.
+
+**Interview answer:** "We start with a demand-score multiplier and accumulate data to fit product-level elasticity coefficients iteratively. That's the standard approach — you can't fit elasticity on day one without historical price-demand variation."
+
+---
+
+#### Kafka View Counter — Message-Level Idempotency
+
+**Problem:** Kafka guarantees at-least-once delivery. A consumer crash mid-processing causes the same `product.viewed` event to be redelivered → `INCR views:{product_id}` fires twice → demand counter overcounts → price can cross the update threshold erroneously.
+
+**Fix — Redis SET NX keyed on Kafka message offset:**
+```python
+msg_key = f"viewed_msg:{message.partition}:{message.offset}"
+already_processed = await redis.set(msg_key, 1, ex=3600, nx=True)
+if not already_processed:
+    return  # duplicate delivery — skip
+await redis.incr(f"views:{product_id}")
+```
+
+This makes the consumer idempotent without Kafka exactly-once semantics (which requires a transactional producer/consumer and adds significant complexity). TTL of 3600s covers any realistic redelivery window.
+
+**Note:** This deduplicates Kafka redelivery, NOT multiple legitimate views from the same user session. Multiple genuine page views should still count — they are real demand signal.
+
+---
+
+#### Shared Redis Embedding Cache (replaces in-process lru_cache)
+
+**Problem:** `@lru_cache(maxsize=2048)` on `embed()` caches in each uvicorn worker's process memory independently. With 4 workers, a cache hit in worker 1 is a cache miss in workers 2–4. Cache is also wiped on every restart.
+
+**Fix:** Redis-backed embedding cache shared across all workers and restarts:
+```python
+async def embed_cached(text: str) -> list[float]:
+    key = f"embed:{hashlib.sha256(text.encode()).hexdigest()[:16]}"
+    redis = get_redis_client()
+    cached = await redis.get(key)
+    if cached:
+        return json.loads(cached)
+    vector = await asyncio.to_thread(embed, text)
+    await redis.setex(key, 3600, json.dumps(vector))
+    return vector
+```
+
+Particularly valuable for repeated search queries (common in chat autocomplete) and for the same product description being embedded across multiple ingestion runs.
+
+---
+
+#### Hybrid Search — Reciprocal Rank Fusion (build this way from Day 11)
+
+**Problem with SQL-constrains-then-vector:** If SQL filters too aggressively (e.g. `avg_rating > 4.0` cuts corpus to 15 products), vector search has almost nothing to rank. The retrieval quality is hostage to how tight the SQL filter is.
+
+**Better approach — Reciprocal Rank Fusion (RRF):** Run SQL ranking and vector ranking independently, then merge:
+```python
+# RRF score for each product
+rrf_score = 1/(k + sql_rank) + 1/(k + vector_rank)  # k=60 is standard
+```
+
+Products that rank well in both lists float to the top naturally. If a product is not in the SQL result set, it gets a high `sql_rank` penalty but is not excluded entirely. This is more robust and matches what production hybrid search systems (Elasticsearch, Azure AI Search) actually do.
+
+**Why implement now (not refactor later):** Hybrid search is Day 11 — not yet built. Building it right the first time is the same complexity as building it wrong and refactoring.
+
+---
+
+### 21.2 Phase 2 — After Initial Deployment
+
+#### ML Classifier for Query Router (replaces Bedrock Haiku call)
+
+**Current:** Every query makes a Bedrock Haiku API call (~150ms, ~$0.00025/call) to classify SEMANTIC/ANALYTICAL/HYBRID.
+
+**Replacement:** Fine-tuned `distilbert-base-uncased` 3-class classifier running locally.
+
+- Latency: 10–20ms (no network)
+- Cost: $0/inference after training
+- Training data: the golden test sets already produced 60 labelled examples; generate 500+ using the existing Haiku classifier on diverse queries
+- Accuracy target: > 95% on the edge-case golden set
+
+**Why Phase 2:** Training data must be collected from real query traffic before the model generalises well to production queries. Build and deploy with the LLM router first, collect production query logs (already going to LangSmith), label them, then train and swap.
+
+**Interview framing:** "We used an LLM to bootstrap the classifier, collected production data through LangSmith, then replaced it with a fine-tuned distilbert that's 10x faster and costs nothing per call. The LLM was a data collection tool, not a permanent dependency."
+
+---
+
+### 21.3 Infrastructure — Deployment Target
+
+| Component | Decision | Reason |
+|---|---|---|
+| **EC2 instance** | t3.medium (2 vCPU, 4GB RAM) | t2.micro cannot run Kafka + FastAPI + workers simultaneously; $30/month leaves $170 of $200 budget for 5+ months |
+| **Kafka** | Docker (KRaft) on EC2 | Managed options: Confluent free tier expires after 30 days; MSK costs ~$73/month. KRaft in Docker is free and production-grade for this traffic level |
+| **Qdrant** | Qdrant Cloud | Already deployed — keep as-is |
+| **PostgreSQL** | Supabase | Already deployed — keep as-is |
+| **Redis** | Docker on EC2 | ElastiCache smallest instance is $12/month; Redis in Docker is free for this load |
+| **Container orchestration** | Docker Compose on single EC2 | ECS Fargate is not on free tier (~$36/month for 1vCPU/2GB task); monolith + 2 workers does not need Kubernetes-style orchestration |
+
+**Deployment story for interviews:** "Managed Postgres and vector DB in the cloud for zero ops overhead. Event bus and application layer on a single EC2 with Docker Compose. Terraform provisions the EC2, security groups, Elastic IP, and S3 state backend. One command deploys the entire infrastructure."
+
+---
+
 *ShopSense v2.0 — Modular Monolith + NL-to-SQL Hybrid Retrieval + Terraform Deployment*
 *Built with FastAPI, LangGraph, Kafka, Qdrant, PostgreSQL, Redis, Amazon Bedrock, and AWS*
-*Zero cost during development. ~$0/month on AWS free tier.*
+*Zero cost during development. ~$30/month on AWS (t3.medium EC2).*
 
 ---
 

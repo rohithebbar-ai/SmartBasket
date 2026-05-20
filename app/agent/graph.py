@@ -3,20 +3,25 @@ ShopSense LangGraph agent graph.
 
 Node inventory
 ──────────────
-Real nodes (fully implemented):
-  load_context        — loads Redis history + PostgreSQL user profile
-  classify_intent     — 10-intent classifier via call_llm (fast tier)
-  route_query         — SEMANTIC | ANALYTICAL | HYBRID via classify_query()
-  refuse              — static out-of-scope response (sync, no LLM)
-  save_history        — writes turn to Redis history:{session_id}
-  await_confirmation  — interrupt()-based human-in-the-loop pause
+Real nodes (fully implemented — Days 12–13):
+  load_context            — loads Redis history + PostgreSQL user profile
+  classify_intent         — 10-intent classifier via call_llm (fast tier)
+  route_query             — SEMANTIC | ANALYTICAL | HYBRID via classify_query()
+  refuse                  — static out-of-scope response (sync, no LLM)
+  save_history            — writes turn to Redis history:{session_id}
+  await_confirmation      — interrupt()-based human-in-the-loop pause
+  semantic_search         — filter extraction → embed → Qdrant → flashrank rerank
+  hybrid_search           — RRF merge of SQL + vector rankings
+  nl_to_sql_search        — NL-to-SQL via run_nl_to_sql(); validates before execute
+  compare_products        — Qdrant lookup of named products → synthesise comparison
+  personalise             — score boost by preferred_brands/categories/price/features
+  synthesise              — Bedrock Sonnet generation tier; adapts to query_type
+  handle_purchase_intent  — steps 1-3: extract product → DB stock check → pending_tool
+  propose_tool_action     — formats confirmation prompt; sets pending_tool_description
 
-Mock stubs (return placeholder final_response; replace in later days):
-  semantic_search, nl_to_sql_search, hybrid_search,
-  compare_products, handle_purchase_intent,
+Mock stubs (implemented in later days):
   handle_order_status, handle_post_purchase,
-  handle_wishlist, handle_admin,
-  personalise, synthesise, execute_tool
+  handle_wishlist, handle_admin, execute_tool
 
 Checkpointer
 ────────────
@@ -32,38 +37,25 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from app.agent.nodes.await_confirmation import await_confirmation
+from app.agent.nodes.check_price_trend import check_price_trend
 from app.agent.nodes.classify_intent import classify_intent
+from app.agent.nodes.compare_products import compare_products
+from app.agent.nodes.handle_purchase_intent import handle_purchase_intent
+from app.agent.nodes.hybrid_search import hybrid_search
 from app.agent.nodes.load_context import load_context
+from app.agent.nodes.nl_to_sql_search import nl_to_sql_search
+from app.agent.nodes.personalise import personalise
+from app.agent.nodes.present_price_insight import present_price_insight
+from app.agent.nodes.propose_tool_action import propose_tool_action
 from app.agent.nodes.refuse import refuse
 from app.agent.nodes.route_query import route_query
 from app.agent.nodes.save_history import save_history
+from app.agent.nodes.semantic_search import semantic_search
+from app.agent.nodes.synthesise import synthesise
 from app.agent.state import ShopSenseState
 
-# ── Mock stubs ────────────────────────────────────────────────────────────────
-# Each returns a placeholder final_response. Replace with real implementations
-# as the corresponding day's work is completed.
-
-async def _mock_semantic_search(state: ShopSenseState) -> dict:
-    return {"final_response": "[semantic_search] stub — not yet implemented"}
-
-async def _mock_nl_to_sql_search(state: ShopSenseState) -> dict:
-    return {"final_response": "[nl_to_sql_search] stub — not yet implemented"}
-
-async def _mock_hybrid_search(state: ShopSenseState) -> dict:
-    return {"final_response": "[hybrid_search] stub — not yet implemented"}
-
-async def _mock_personalise(state: ShopSenseState) -> dict:
-    # Passthrough — search_results already in state; synthesise will read them.
-    return {}
-
-async def _mock_synthesise(state: ShopSenseState) -> dict:
-    return {"final_response": "[synthesise] stub — not yet implemented"}
-
-async def _mock_compare_products(state: ShopSenseState) -> dict:
-    return {"final_response": "[compare_products] stub — not yet implemented"}
-
-async def _mock_handle_purchase_intent(state: ShopSenseState) -> dict:
-    return {"final_response": "[handle_purchase_intent] stub — not yet implemented"}
+# ── Remaining mock stubs ───────────────────────────────────────────────────────
+# Order/wishlist/admin flows and execute_tool — implemented in later days.
 
 async def _mock_handle_order_status(state: ShopSenseState) -> dict:
     return {"final_response": "[handle_order_status] stub — not yet implemented"}
@@ -144,14 +136,21 @@ def _build_graph() -> StateGraph:
     builder.add_node("save_history",      save_history)
     builder.add_node("await_confirmation", await_confirmation)
 
+    # ── Real nodes (Day 13) ───────────────────────────────────────────────────
+    builder.add_node("semantic_search",       semantic_search)
+    builder.add_node("nl_to_sql_search",      nl_to_sql_search)
+    builder.add_node("hybrid_search",         hybrid_search)
+    builder.add_node("personalise",           personalise)
+    builder.add_node("synthesise",            synthesise)
+    builder.add_node("compare_products",      compare_products)
+
+    # ── Day 13 nodes ──────────────────────────────────────────────────────────
+    builder.add_node("handle_purchase_intent", handle_purchase_intent)
+    builder.add_node("check_price_trend",      check_price_trend)
+    builder.add_node("present_price_insight",  present_price_insight)
+    builder.add_node("propose_tool_action",    propose_tool_action)   # sync node — fine in LangGraph
+
     # ── Mock nodes ────────────────────────────────────────────────────────────
-    builder.add_node("semantic_search",       _mock_semantic_search)
-    builder.add_node("nl_to_sql_search",      _mock_nl_to_sql_search)
-    builder.add_node("hybrid_search",         _mock_hybrid_search)
-    builder.add_node("personalise",           _mock_personalise)
-    builder.add_node("synthesise",            _mock_synthesise)
-    builder.add_node("compare_products",      _mock_compare_products)
-    builder.add_node("handle_purchase_intent", _mock_handle_purchase_intent)
     builder.add_node("handle_order_status",   _mock_handle_order_status)
     builder.add_node("handle_post_purchase",  _mock_handle_post_purchase)
     builder.add_node("handle_wishlist",       _mock_handle_wishlist)
@@ -195,11 +194,29 @@ def _build_graph() -> StateGraph:
     builder.add_edge("hybrid_search",    "personalise")
     builder.add_edge("personalise",      "synthesise")
     builder.add_edge("nl_to_sql_search", "synthesise")
+    builder.add_edge("compare_products", "synthesise")  # bypasses personalise — deterministic
     builder.add_edge("synthesise",       "save_history")
 
+    # ── Purchase intent flow ──────────────────────────────────────────────────
+    # handle_purchase_intent has two paths:
+    #   normal: pending_tool is set → check_price_trend → present_price_insight → ...
+    #   error:  final_response is set (product not found / OOS) → save_history
+    builder.add_conditional_edges(
+        "handle_purchase_intent",
+        lambda s: "check_price_trend" if s.get("pending_tool") else "save_history",
+        {"check_price_trend": "check_price_trend", "save_history": "save_history"},
+    )
+    builder.add_edge("check_price_trend", "present_price_insight")
+
+    # present_price_insight: surge shown → await_confirmation; no surge → propose_tool_action
+    builder.add_conditional_edges(
+        "present_price_insight",
+        lambda s: "await_confirmation" if s.get("price_insight_shown") else "propose_tool_action",
+        {"await_confirmation": "await_confirmation", "propose_tool_action": "propose_tool_action"},
+    )
+    builder.add_edge("propose_tool_action", "await_confirmation")
+
     # ── Direct-to-save_history paths ──────────────────────────────────────────
-    builder.add_edge("compare_products",       "save_history")
-    builder.add_edge("handle_purchase_intent", "save_history")
     builder.add_edge("handle_order_status",    "save_history")
     builder.add_edge("handle_wishlist",        "save_history")
 

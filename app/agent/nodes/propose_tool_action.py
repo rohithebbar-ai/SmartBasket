@@ -1,21 +1,71 @@
+"""
+propose_tool_action — formats a write tool as a human-readable confirmation prompt.
+
+Reads state.pending_tool and state.pending_tool_args to build the message.
+Sets state.final_response (shown in the chat) and state.pending_tool_description
+(used by await_confirmation's interrupt() call so the pause payload matches
+what the user saw).
+
+Supported tools:
+  add_to_cart       — product name + price
+  process_payment   — total + card last4
+  set_price_alert   — email + target price
+  cancel_order      — order_id prefix
+
+Unknown tools get a generic "shall I proceed with {tool}?" fallback.
+
+Sync — no LLM, no DB, no await needed.
+
+Reads:  state.pending_tool, state.pending_tool_args
+Writes: state.final_response (str — confirmation question shown to user)
+        state.pending_tool_description (str — interrupt payload for await_confirmation)
+        state.awaiting_confirmation (bool — True)
+
+Outgoing edge: → await_confirmation
+"""
+
 from app.agent.state import ShopSenseState
 
 
-async def propose_tool_action(state: ShopSenseState) -> ShopSenseState:
-    """
-    Formats a write tool action as a human-readable description and presents it
-    to the user before execution. The graph pauses here until the user responds.
+def propose_tool_action(state: ShopSenseState) -> dict:
+    tool = state.get("pending_tool", "")
+    args = state.get("pending_tool_args", {})
 
-    Example output for add_to_cart:
-      "I'll add the Dell XPS 15 (₹78,750) to your cart. Shall I proceed?"
+    if tool == "add_to_cart":
+        product_name = args.get("product_name", "this product")
+        price = args.get("current_price", 0)
+        msg = (
+            f"I'll add {product_name} (₹{price:,.0f}) to your cart. Shall I proceed?"
+        )
 
-    Example output for process_payment:
-      "Your total is ₹78,750 (incl. GST + ₹150 delivery). Charge your Visa ending in 4242?"
+    elif tool == "process_payment":
+        total = args.get("total", 0)
+        delivery = args.get("delivery_fee", 0)
+        last4 = args.get("card_last4", "****")
+        msg = (
+            f"Your total is ₹{total:,.0f} (incl. GST + ₹{delivery:,.0f} delivery). "
+            f"Charge your Visa ending in {last4}?"
+        )
 
-    Reads:  state.pending_tool, state.pending_tool_args, state.pending_tool_description
-    Writes: state.final_response (the confirmation prompt shown to the user),
-            state.awaiting_confirmation = True
+    elif tool == "set_price_alert":
+        email = args.get("user_email") or state.get("user_email") or "your registered email"
+        target = args.get("target_price", 0)
+        msg = (
+            f"I'll notify you at {email} when the price drops "
+            f"to ₹{target:,.0f} or below. Shall I set that up?"
+        )
 
-    Outgoing edge: → await_confirmation
-    """
-    raise NotImplementedError("Implement in Phase 1 tool calling — Section 19.7")
+    elif tool == "cancel_order":
+        order_prefix = str(args.get("order_id", ""))[:8].upper()
+        msg = f"Are you sure you want to cancel order #{order_prefix}?"
+
+    else:
+        desc = state.get("pending_tool_description") or f"proceed with {tool}"
+        msg = f"Shall I {desc}?"
+
+    return {
+        "final_response": msg,
+        "pending_tool_description": msg,   # await_confirmation interrupts with this
+        "confirmation_context": msg,       # shown alongside the confirm prompt
+        "awaiting_confirmation": True,
+    }

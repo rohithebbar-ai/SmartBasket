@@ -73,9 +73,8 @@ def create_app() -> FastAPI:
     from app.analytics.router import router as analytics_router
     app.include_router(analytics_router, prefix="/api/analytics", tags=["analytics"])
 
-    # Uncomment as each module is implemented:
-    # from app.agent.router import router as agent_router
-    # app.include_router(agent_router, prefix="/api/chat", tags=["agent"])
+    from app.agent.router import router as agent_router
+    app.include_router(agent_router, prefix="/api/chat", tags=["agent"])
 
     # ── System endpoints ──────────────────────────────────────────────────────
 

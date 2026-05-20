@@ -1,26 +1,104 @@
+"""
+synthesise — generates the final user-facing response via Bedrock Sonnet.
+
+Adapts its context block by query_type:
+  SEMANTIC / HYBRID / COMPARE → reads state.search_results (list[dict])
+  ANALYTICAL                  → reads state.sql_results (list[dict]) + state.generated_sql
+
+If nl_to_sql_search already wrote final_response (validation failure), this node
+returns immediately without an LLM call so the error message reaches save_history.
+
+Reads:  state.search_results | state.sql_results, state.query_type,
+        state.messages, state.user_preferences, state.generated_sql
+Writes: state.final_response (str)
+
+Outgoing edge: → save_history
+"""
+
+import json
+import logging
+
+from app.agent.prompts import SYNTHESIS_PROMPT
 from app.agent.state import ShopSenseState
-from app.schemas.search import ProductResult
+from app.llm import call_llm
+
+log = logging.getLogger(__name__)
+
+_FALLBACK_RESPONSE = (
+    "I'm sorry, I couldn't find relevant results for your query. "
+    "Please try rephrasing or use more specific terms."
+)
+
+_MAX_RESULTS_IN_PROMPT = 5
+_MAX_SQL_ROWS_IN_PROMPT = 10
 
 
-async def synthesise(state: ShopSenseState) -> ShopSenseState:
-    """
-    Generates the final streaming response using Bedrock Sonnet.
+def _format_product(r: dict, rank: int) -> str:
+    lines = [
+        f"{rank}. {r.get('brand', '')} {r.get('name', '')}",
+        f"   Price: ₹{r.get('current_price', 0):,.0f}  |  Rating: {r.get('avg_rating', 0):.1f}/5",
+    ]
+    specs = r.get("specs") or {}
+    if specs:
+        spec_pairs = [f"{k}: {v}" for k, v in list(specs.items())[:4]]
+        lines.append("   Specs: " + ", ".join(spec_pairs))
+    sentiment = r.get("sentiment_scores") or {}
+    if sentiment:
+        top_sentiments = sorted(sentiment.items(), key=lambda x: x[1], reverse=True)[:3]
+        lines.append("   Sentiment: " + ", ".join(f"{k}={v:.1f}" for k, v in top_sentiments))
+    use_cases = r.get("use_cases") or []
+    if use_cases:
+        lines.append("   Use cases: " + ", ".join(use_cases[:3]))
+    return "\n".join(lines)
 
-    Reads state.query_type and adapts tone accordingly:
-      SEMANTIC    → warm, conversational product recommendation
-      ANALYTICAL  → clear data presentation with a brief insight
-      HYBRID      → leads with the data finding, then explains the products
 
-    For SEMANTIC/HYBRID: reads state.search_results (list[ProductResult]).
-    For ANALYTICAL: reads state.sql_results (list[dict]) and state.generated_sql.
-    Sources written to state.sources are product_id strings from ProductResult.product_id.
+def _build_context_block(state: ShopSenseState, query_type: str) -> str:
+    if query_type == "ANALYTICAL":
+        rows = (state.get("sql_results") or [])[:_MAX_SQL_ROWS_IN_PROMPT]
+        sql = state.get("generated_sql", "")
+        if not rows:
+            return "No data rows returned."
+        return (
+            f"SQL executed:\n{sql}\n\n"
+            f"Results ({len(rows)} rows):\n"
+            + json.dumps(rows, indent=2, default=str)
+        )
 
-    Streams tokens via FastAPI SSE. Full LangSmith trace on every call.
+    results = (state.get("search_results") or [])[:_MAX_RESULTS_IN_PROMPT]
+    if not results:
+        return "No products found."
+    return "Products found:\n\n" + "\n\n".join(
+        _format_product(r, i + 1) for i, r in enumerate(results)
+    )
 
-    Reads:  state.search_results (list[ProductResult]) | state.sql_results (list[dict]),
-            state.query_type, state.messages, state.user_preferences
-    Writes: state.final_response (str), state.sources (list[str])
 
-    Outgoing edge: → save_history → END
-    """
-    raise NotImplementedError("Implement in Week 3 — LangGraph agent phase (Days 12–13)")
+async def synthesise(state: ShopSenseState) -> dict:
+    # If validation failed in nl_to_sql_search, final_response is already set
+    if state.get("final_response"):
+        return {}
+
+    messages = state.get("messages", [])
+    question = messages[-1]["content"] if messages else ""
+    query_type = state.get("query_type", "SEMANTIC").upper()
+    user_preferences = state.get("user_preferences") or {}
+
+    context_block = _build_context_block(state, query_type)
+
+    prompt = SYNTHESIS_PROMPT.format(
+        question=question,
+        query_type=query_type,
+        context_block=context_block,
+        user_preferences=json.dumps(user_preferences) if user_preferences else "none",
+    )
+
+    try:
+        response = await call_llm(prompt, tier="generation", max_tokens=400, temperature=0.3)
+    except Exception as exc:
+        log.error("Synthesis LLM call failed: %s", exc)
+        response = _FALLBACK_RESPONSE
+
+    sources = state.get("sources") or []
+    return {
+        "final_response": response,
+        "sources": sources,
+    }

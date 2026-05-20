@@ -100,4 +100,26 @@ async def load_context(state: ShopSenseState) -> dict:
         "messages": messages,
         "user_email": user_email,
         "user_preferences": user_preferences,
+        # Clear per-turn output fields so stale values from a previous graph run
+        # on the same thread_id don't leak into this turn. MemorySaver/RedisSaver
+        # persists state across invocations — without this, a previous NL-to-SQL
+        # failure's final_response would cause synthesise to early-exit next turn.
+        # ── Per-turn output fields — reset so stale values don't leak ──────────
+        # search_results and sources are intentionally NOT reset: handle_purchase_intent
+        # reads state["sources"][0] from the previous search turn to identify the product.
+        # They will be overwritten by whatever search node runs this turn.
+        "final_response": "",
+        "sql_results": [],
+        "generated_sql": "",
+        # Tool-calling — cleared each fresh invocation (resume paths skip load_context)
+        "pending_tool": "",
+        "pending_tool_args": {},
+        "pending_tool_description": "",
+        "awaiting_confirmation": False,
+        "confirmation_context": "",
+        "user_decision": "",
+        # Price intelligence — cleared each fresh invocation
+        "price_trend_pct": 0.0,
+        "price_insight_shown": False,
+        "price_alert_set": False,
     }

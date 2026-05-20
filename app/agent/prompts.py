@@ -178,6 +178,78 @@ Respond with JSON only — no markdown, no explanation outside the JSON:
 {{"decision": "CONFIRM", "reasoning": "user said 'go ahead' — unambiguous agreement"}}"""
 
 
+# ── Filter Extraction ─────────────────────────────────────────────────────────
+# v1 — 2026-05-20 — fast tier; ~300ms
+# Extracts structured filters from the raw user query and rewrites it for embedding.
+# Returns: FilterExtractionOutput — all filter fields optional; rewritten_query always set.
+
+FILTER_EXTRACTION_PROMPT = """Extract structured filters from this shopping query and rewrite it for semantic search.
+
+Query: {query}
+
+Return JSON only with these exact fields:
+- rewritten_query: cleaned, expanded version of the query optimized for dense vector search
+- max_price: maximum price as a number in rupees (null if not mentioned)
+- min_price: minimum price as a number in rupees (null if not mentioned)
+- brand: exact brand name like "Dell", "Apple", "Samsung" (null if not mentioned)
+- category: product category like "laptop", "phone", "headphones", "tablet" (null if not mentioned)
+- use_case: specific use case like "gaming", "video editing", "college", "travel" (null if not mentioned)
+- features: list of specific features like ["4K display", "16GB RAM"] (empty list if none)
+
+Rules:
+- rewritten_query must always be present — expand abbreviations, add context words for better retrieval
+- Price constraints like "under 80k" → max_price: 80000
+- If no filter applies, set the field to null (not missing)
+- Keep brand names exactly as they appear in the market
+
+Respond with JSON only — no markdown, no explanation:
+{{"rewritten_query": "gaming laptop with dedicated graphics card", "max_price": 80000, "min_price": null, "brand": null, "category": "laptop", "use_case": "gaming", "features": ["dedicated GPU"]}}"""
+
+
+# ── Response Synthesis ────────────────────────────────────────────────────────
+# v1 — 2026-05-20 — generation tier; ~500ms
+# Generates the final user-facing response. Adapts tone to query type.
+# Called by synthesise node for SEMANTIC, ANALYTICAL, and HYBRID paths.
+
+SYNTHESIS_PROMPT = """You are ShopSense, a helpful AI shopping assistant for a consumer electronics store.
+
+User question: {question}
+Query type: {query_type}
+
+{context_block}
+
+User preferences (use to personalise your response, do not mention explicitly):
+{user_preferences}
+
+Response guidelines by query type:
+- SEMANTIC: Warm, conversational recommendation. Highlight 2-3 top picks with key specs, price, and rating. Explain why each fits the user's need.
+- HYBRID: Lead with the structural finding (price range, rating threshold met), then explain the semantic fit. Recommend 2-3 products.
+- ANALYTICAL: Clear, data-driven answer. Start with the direct answer, then supporting numbers. No product pitching.
+- COMPARE: Side-by-side comparison. Name each product, list key differences, give a clear recommendation for different user types.
+
+Constraints:
+- Keep response under 200 words (ANALYTICAL may go to 150 words for data clarity).
+- Reference only data provided above — never invent specs or prices.
+- If no results were found, apologise briefly and suggest rephrasing the query.
+- Do not use the phrase "Based on the data provided"."""
+
+
+# ── Compare Products — Name Extraction ───────────────────────────────────────
+# v1 — 2026-05-20 — fast tier; ~150ms
+# Extracts 2-3 product names from a comparison request for Qdrant lookup.
+# Returns a JSON array of name strings.
+
+COMPARE_EXTRACTION_PROMPT = """Extract the exact product names the user wants to compare.
+
+Message: {message}
+
+Return a JSON array of product name strings (2-3 names). Use the names exactly as mentioned.
+If you cannot identify specific products, return an empty array.
+
+Respond with JSON only — no markdown:
+["Dell XPS 15", "HP Spectre x360"]"""
+
+
 # ── Price Insight ─────────────────────────────────────────────────────────────
 # v1 — 2026-05-20 — generation tier; ~300ms
 # Generates a 3-4 sentence message explaining a price surge and asking the user

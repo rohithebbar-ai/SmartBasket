@@ -1,18 +1,34 @@
+"""
+hybrid_search — HYBRID retrieval path (RRF).
+
+Delegates entirely to app.search.hybrid_search.hybrid_search(), which runs
+SQL ranking and vector ranking concurrently and merges them with Reciprocal
+Rank Fusion:  rrf_score = 1/(60 + sql_rank) + 1/(60 + vector_rank).
+
+Reads:  state.messages (last user message)
+Writes: state.search_results (list[dict] — RRF-merged, sorted by rrf_score desc)
+        state.sources (list[str] — product_id strings)
+
+Outgoing edge: → personalise
+"""
+
+import logging
+
 from app.agent.state import ShopSenseState
+from app.database import AsyncSessionLocal
+from app.search.hybrid_search import hybrid_search as _hybrid_search
+
+log = logging.getLogger(__name__)
 
 
-async def hybrid_search(state: ShopSenseState) -> ShopSenseState:
-    """
-    Runs the hybrid retrieval path for queries needing both structured filters
-    and semantic ranking.
+async def hybrid_search(state: ShopSenseState) -> dict:
+    messages = state.get("messages", [])
+    query = messages[-1]["content"] if messages else ""
 
-    Delegates to app.search.hybrid_search.hybrid_search().
-    Uses RRF (Reciprocal Rank Fusion) to merge SQL and vector rankings —
-    rrf_score = 1/(60 + sql_rank) + 1/(60 + vector_rank).
+    async with AsyncSessionLocal() as db:
+        results = await _hybrid_search(query=query, db=db, top_k=10)
 
-    Reads:  state.messages (last user message)
-    Writes: state.search_results (RRF-merged results, sorted by rrf_score desc)
-
-    Outgoing edge: → personalise
-    """
-    raise NotImplementedError("Implement in Week 3 — LangGraph agent phase (Days 12–13)")
+    return {
+        "search_results": [r.model_dump() for r in results],
+        "sources": [r.product_id for r in results],
+    }

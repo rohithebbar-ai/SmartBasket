@@ -10,6 +10,7 @@ from app.orders.kafka_consumer import start_consumer as start_orders_consumer
 from app.orders.kafka_consumer import stop_consumer as stop_orders_consumer
 from app.search.kafka_consumer import start_consumer as start_search_consumer
 from app.search.kafka_consumer import stop_consumer as stop_search_consumer
+from app.search.pricing_engine import start_pricing_engine, stop_pricing_engine
 from app.orders.kafka_producer import close_producer as close_orders_producer
 from app.products.kafka import close_producer as close_products_producer
 from app.redis_client import close_pool, ping
@@ -20,10 +21,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # startup
     await start_orders_consumer()
     await start_search_consumer()
+    await start_pricing_engine()
     yield
-    # shutdown — cancel consumers first, then drain producers and pools
+    # shutdown — cancel consumers + engine first, then drain producers and pools
     await stop_orders_consumer()
     await stop_search_consumer()
+    await stop_pricing_engine()
     await dispose_engine()
     await close_pool()
     await close_products_producer()
@@ -67,11 +70,12 @@ def create_app() -> FastAPI:
     from app.search.router import router as search_router
     app.include_router(search_router, prefix="/api/search", tags=["search"])
 
+    from app.analytics.router import router as analytics_router
+    app.include_router(analytics_router, prefix="/api/analytics", tags=["analytics"])
+
     # Uncomment as each module is implemented:
     # from app.agent.router import router as agent_router
-    # from app.analytics.router import router as analytics_router
     # app.include_router(agent_router, prefix="/api/chat", tags=["agent"])
-    # app.include_router(analytics_router, prefix="/api/analytics", tags=["analytics"])
 
     # ── System endpoints ──────────────────────────────────────────────────────
 

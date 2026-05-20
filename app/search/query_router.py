@@ -17,41 +17,19 @@ Called by:
   - app/agent/nodes/route_query.py  (inside LangGraph)
 """
 
-import asyncio
 import hashlib
 import logging
 
-import boto3
 from pydantic import ValidationError
 
-from app.agent.prompts import QUERY_ROUTER_PROMPT
-from app.config import settings
+from app.agent.prompts import QUERY_ROUTER_PROMPT, QUERY_TYPE_ROUTER_PROMPT
+from app.llm import call_llm
 from app.redis_client import get_redis_client
 from app.schemas.llm import QueryRouterOutput
 
 log = logging.getLogger(__name__)
 
-ROUTER_CACHE_TTL = 300  # seconds — same query twice within 5 min skips Bedrock
-
-# ── Bedrock client singleton ───────────────────────────────────────────────────
-
-_bedrock = None
-
-
-def _get_bedrock():
-    global _bedrock
-    if _bedrock is None:
-        if settings.aws_profile:
-            session = boto3.Session(profile_name=settings.aws_profile)
-            _bedrock = session.client("bedrock-runtime", region_name=settings.aws_region)
-        else:
-            kwargs: dict = {"region_name": settings.aws_region}
-            if settings.aws_access_key_id and settings.aws_secret_access_key:
-                kwargs["aws_access_key_id"] = settings.aws_access_key_id
-                kwargs["aws_secret_access_key"] = settings.aws_secret_access_key
-            _bedrock = boto3.client("bedrock-runtime", **kwargs)
-    return _bedrock
-
+ROUTER_CACHE_TTL = 300  # seconds — same query twice within 5 min skips the LLM
 
 # ── Cache helpers ──────────────────────────────────────────────────────────────
 
@@ -77,42 +55,29 @@ async def _set_cached(query: str, result: QueryRouterOutput) -> None:
     await redis.setex(_cache_key(query), ROUTER_CACHE_TTL, result.model_dump_json())
 
 
-# ── Bedrock call (sync, runs in thread pool) ───────────────────────────────────
-
-def _call_bedrock(prompt: str) -> str:
-    response = _get_bedrock().converse(
-        modelId=settings.bedrock_fast_model_id,
-        messages=[{"role": "user", "content": [{"text": prompt}]}],
-        inferenceConfig={
-            "maxTokens": 150,
-            "temperature": 0.0,  # deterministic classification
-        },
-    )
-    text = response["output"]["message"]["content"][0]["text"].strip()
-    # Haiku wraps JSON in ```json ... ``` fences despite instructions — strip them.
-    if text.startswith("```"):
-        text = text.split("```", 2)[1]         # drop opening fence line
-        if text.startswith("json"):
-            text = text[4:]                    # drop language tag
-        text = text.rsplit("```", 1)[0].strip()
-    return text
-
-
 # ── Core classifier ────────────────────────────────────────────────────────────
 
-async def classify_query(query: str) -> QueryRouterOutput:
+async def classify_query(query: str, history: str = "") -> QueryRouterOutput:
     """
     Returns QueryRouterOutput with type SEMANTIC | ANALYTICAL | HYBRID.
     Raises ValidationError if LLM returns an unexpected value — caller retries.
     Cache hit (TTL=300s) skips Bedrock entirely.
+
+    history: optional prior-turn context (agent graph only). When provided,
+    uses QUERY_TYPE_ROUTER_PROMPT (history-aware) instead of QUERY_ROUTER_PROMPT.
+    Cache is keyed on query only — history is not included so identical queries
+    share cache hits across turns.
     """
     cached = await _get_cached(query)
     if cached is not None:
         log.debug("Query router cache hit: %.60s", query)
         return cached
 
-    prompt = QUERY_ROUTER_PROMPT.format(query=query)
-    raw = await asyncio.to_thread(_call_bedrock, prompt)
+    if history:
+        prompt = QUERY_TYPE_ROUTER_PROMPT.format(history=history, message=query)
+    else:
+        prompt = QUERY_ROUTER_PROMPT.format(query=query)
+    raw = await call_llm(prompt, tier="fast", max_tokens=150, temperature=0.0)
 
     result = QueryRouterOutput.model_validate_json(raw)
 

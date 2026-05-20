@@ -2,7 +2,7 @@
 Tests for app/search/query_router.py
 
 Strategy:
-- All Bedrock calls are patched — no AWS credentials needed.
+- All LLM calls are patched — no provider credentials needed.
 - Redis calls are patched to control cache hit/miss behaviour.
 - ValidationError propagation test ensures LLM hallucinations are caught at boundary.
 """
@@ -18,7 +18,7 @@ from app.schemas.llm import QueryRouterOutput
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _bedrock_response(query_type: str, reasoning: str = "test reasoning") -> str:
+def _llm_response(query_type: str, reasoning: str = "test reasoning") -> str:
     return json.dumps({"type": query_type, "reasoning": reasoning})
 
 
@@ -51,11 +51,11 @@ class TestQueryRouterClassification:
     ])
     async def test_classify_returns_correct_type(self, query: str, expected_type: str):
         mock_redis = _mock_redis(cached_value=None)
-        raw = _bedrock_response(expected_type)
+        raw = _llm_response(expected_type)
 
         with (
             patch("app.search.query_router.get_redis_client", return_value=mock_redis),
-            patch("app.search.query_router._call_bedrock", return_value=raw),
+            patch("app.search.query_router.call_llm", new_callable=AsyncMock, return_value=raw),
         ):
             from app.search.query_router import classify_query
             result = await classify_query(query)
@@ -67,11 +67,11 @@ class TestQueryRouterClassification:
     @pytest.mark.asyncio
     async def test_result_is_query_router_output_instance(self):
         mock_redis = _mock_redis(cached_value=None)
-        raw = _bedrock_response("SEMANTIC")
+        raw = _llm_response("SEMANTIC")
 
         with (
             patch("app.search.query_router.get_redis_client", return_value=mock_redis),
-            patch("app.search.query_router._call_bedrock", return_value=raw),
+            patch("app.search.query_router.call_llm", new_callable=AsyncMock, return_value=raw),
         ):
             from app.search.query_router import classify_query
             result = await classify_query("good laptop for students")
@@ -85,16 +85,16 @@ class TestQueryRouterCaching:
     @pytest.mark.asyncio
     async def test_cache_miss_calls_bedrock_and_writes_cache(self):
         mock_redis = _mock_redis(cached_value=None)
-        raw = _bedrock_response("SEMANTIC", "exploratory query")
+        raw = _llm_response("SEMANTIC", "exploratory query")
 
         with (
             patch("app.search.query_router.get_redis_client", return_value=mock_redis),
-            patch("app.search.query_router._call_bedrock", return_value=raw) as mock_bedrock,
+            patch("app.search.query_router.call_llm", new_callable=AsyncMock, return_value=raw) as mock_llm,
         ):
             from app.search.query_router import classify_query
             result = await classify_query("laptop for travel")
 
-        mock_bedrock.assert_called_once()
+        mock_llm.assert_called_once()
         mock_redis.setex.assert_called_once()
         assert result.type == "SEMANTIC"
 
@@ -105,22 +105,22 @@ class TestQueryRouterCaching:
 
         with (
             patch("app.search.query_router.get_redis_client", return_value=mock_redis),
-            patch("app.search.query_router._call_bedrock") as mock_bedrock,
+            patch("app.search.query_router.call_llm", new_callable=AsyncMock) as mock_llm,
         ):
             from app.search.query_router import classify_query
             result = await classify_query("best laptop under 80k")
 
-        mock_bedrock.assert_not_called()
+        mock_llm.assert_not_called()
         assert result.type == "HYBRID"
 
     @pytest.mark.asyncio
     async def test_cache_ttl_is_set_correctly(self):
         mock_redis = _mock_redis(cached_value=None)
-        raw = _bedrock_response("ANALYTICAL")
+        raw = _llm_response("ANALYTICAL")
 
         with (
             patch("app.search.query_router.get_redis_client", return_value=mock_redis),
-            patch("app.search.query_router._call_bedrock", return_value=raw),
+            patch("app.search.query_router.call_llm", new_callable=AsyncMock, return_value=raw),
         ):
             from app.search.query_router import classify_query, ROUTER_CACHE_TTL
             await classify_query("which brand has highest avg rating")
@@ -131,18 +131,18 @@ class TestQueryRouterCaching:
 
     @pytest.mark.asyncio
     async def test_corrupt_cache_falls_through_to_bedrock(self):
-        """A corrupted cache value must not crash — fall through to Bedrock."""
+        """A corrupted cache value must not crash — fall through to the LLM."""
         mock_redis = _mock_redis(cached_value="not-valid-json{{")
-        raw = _bedrock_response("SEMANTIC")
+        raw = _llm_response("SEMANTIC")
 
         with (
             patch("app.search.query_router.get_redis_client", return_value=mock_redis),
-            patch("app.search.query_router._call_bedrock", return_value=raw) as mock_bedrock,
+            patch("app.search.query_router.call_llm", new_callable=AsyncMock, return_value=raw) as mock_llm,
         ):
             from app.search.query_router import classify_query
             result = await classify_query("laptop for photo editing")
 
-        mock_bedrock.assert_called_once()
+        mock_llm.assert_called_once()
         assert result.type == "SEMANTIC"
 
     @pytest.mark.asyncio
@@ -170,13 +170,13 @@ class TestQueryRouterCaching:
 class TestQueryRouterValidation:
     @pytest.mark.asyncio
     async def test_bad_llm_response_raises_validation_error(self):
-        """If Bedrock returns an unexpected type value, ValidationError must propagate."""
+        """If the LLM returns an unexpected type value, ValidationError must propagate."""
         mock_redis = _mock_redis(cached_value=None)
         bad_response = json.dumps({"type": "VECTOR_SEARCH", "reasoning": "made up"})
 
         with (
             patch("app.search.query_router.get_redis_client", return_value=mock_redis),
-            patch("app.search.query_router._call_bedrock", return_value=bad_response),
+            patch("app.search.query_router.call_llm", new_callable=AsyncMock, return_value=bad_response),
         ):
             from app.search.query_router import classify_query
             with pytest.raises(ValidationError):
@@ -189,7 +189,7 @@ class TestQueryRouterValidation:
 
         with (
             patch("app.search.query_router.get_redis_client", return_value=mock_redis),
-            patch("app.search.query_router._call_bedrock", return_value="This is SEMANTIC because..."),
+            patch("app.search.query_router.call_llm", new_callable=AsyncMock, return_value="This is SEMANTIC because..."),
         ):
             from app.search.query_router import classify_query
             with pytest.raises(Exception):

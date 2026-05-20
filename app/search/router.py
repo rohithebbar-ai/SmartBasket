@@ -3,32 +3,35 @@ Search router — query-routed search endpoint.
 
 POST /api/search/
     1. Classify query as SEMANTIC | ANALYTICAL | HYBRID (Bedrock Haiku, ~150ms, Redis-cached).
-    2. SEMANTIC  → embed → Qdrant top-20 → flashrank rerank → return top_k.
-    3. ANALYTICAL / HYBRID → 501 Not Implemented (NL-to-SQL engine lands on Day 10/11).
+    2. SEMANTIC   → embed → Qdrant top-20 → flashrank rerank → SearchResponse
+    3. ANALYTICAL → run_nl_to_sql → AnalyticsResponse
+    4. HYBRID     → 501 Not Implemented (RRF hybrid search lands on Day 11)
 
-All three underlying search operations (embed, Qdrant, flashrank) use
-synchronous libraries dispatched via asyncio.to_thread so the event loop is
-never blocked.
-
-Filters in the request body are optional pre-filters applied inside Qdrant
-before vector search (more accurate than post-filtering on large collections).
+Callers inspect `query_type` in the response to know which shape was returned.
 """
 
 import asyncio
 import logging
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from qdrant_client.models import FieldCondition, Filter, MatchValue, Range
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.schemas.search import SearchResponse
+from app.database import get_db
+from app.schemas.search import AnalyticsResponse, SearchResponse
 from app.search.embedder import embed
+from app.search.hybrid_search import hybrid_search
+from app.search.nl_to_sql import run_nl_to_sql
 from app.search.qdrant_ops import search
 from app.search.query_router import classify_query
 from app.search.reranker import rerank
 
 log = logging.getLogger(__name__)
 router = APIRouter()
+
+# Tables available for customer-facing ANALYTICAL queries (no orders — user-scoped)
+SEARCH_ANALYTICAL_SCOPE = ["products", "reviews", "price_history"]
 
 
 # ── Request / filter schema ───────────────────────────────────────────────────
@@ -72,29 +75,57 @@ def _build_qdrant_filter(f: SearchFilters) -> Filter | None:
 
 # ── Endpoint ──────────────────────────────────────────────────────────────────
 
-@router.post("/", response_model=SearchResponse, summary="Product search")
-async def product_search(body: SearchRequest) -> SearchResponse:
+@router.post("/", summary="Product search")
+async def product_search(
+    body: SearchRequest,
+    db: AsyncSession = Depends(get_db),
+) -> SearchResponse | AnalyticsResponse:
     """
     1. Classify query type (SEMANTIC | ANALYTICAL | HYBRID) via Bedrock Haiku.
-    2. SEMANTIC: embed → Qdrant → rerank → return results.
-    3. ANALYTICAL / HYBRID: 501 until NL-to-SQL engine is available (Day 10/11).
+    2. SEMANTIC:   embed → Qdrant → rerank → SearchResponse
+    3. ANALYTICAL: NL-to-SQL → AnalyticsResponse (no insight synthesis — raw results)
+    4. HYBRID:     501 until Day 11 RRF hybrid search is built
     """
     routing = await classify_query(body.query)
     log.info("Search routing: query_type=%s query='%.80s'", routing.type, body.query)
 
-    if routing.type != "SEMANTIC":
-        raise HTTPException(
-            status_code=status.HTTP_501_NOT_IMPLEMENTED,
-            detail={
-                "query_type": routing.type,
-                "reasoning": routing.reasoning,
-                "message": (
-                    f"{routing.type} queries require the NL-to-SQL engine "
-                    "(available from Day 10). Try a descriptive product query instead."
-                ),
-            },
+    # ── ANALYTICAL ────────────────────────────────────────────────────────────
+    if routing.type == "ANALYTICAL":
+        result = await run_nl_to_sql(
+            query=body.query,
+            schema_scope=SEARCH_ANALYTICAL_SCOPE,
+            db=db,
+            source="customer",
+            use_few_shot=True,
+        )
+        if not result.validation_passed:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "query_type": "ANALYTICAL",
+                    "message": "Could not generate valid SQL for this query. Try rephrasing.",
+                    "reasoning": routing.reasoning,
+                },
+            )
+        return AnalyticsResponse(
+            question=body.query,
+            sql=result.generated_sql,
+            results=result.rows,
+            insight="",   # no Sonnet synthesis on the search path — speed matters
+            rows_returned=result.rows_returned,
         )
 
+    # ── HYBRID ────────────────────────────────────────────────────────────────
+    if routing.type == "HYBRID":
+        results = await hybrid_search(query=body.query, db=db, top_k=body.top_k)
+        return SearchResponse(
+            query=body.query,
+            query_type="HYBRID",
+            results=results,
+            total=len(results),
+        )
+
+    # ── SEMANTIC ──────────────────────────────────────────────────────────────
     vector = await asyncio.to_thread(embed, body.query)
 
     qdrant_filter = _build_qdrant_filter(body.filters)

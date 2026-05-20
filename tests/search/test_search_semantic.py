@@ -93,29 +93,76 @@ class TestQueryRouting:
         assert resp.status_code == 200
         assert resp.json()["query_type"] == "SEMANTIC"
 
-    def test_analytical_query_returns_501(self, client: TestClient):
-        with patch("app.search.router.classify_query", return_value=_analytical_routing()):
+    def test_analytical_query_routes_to_nl_to_sql(self, client: TestClient):
+        from app.schemas.search import NLToSQLResult
+        nl_result = NLToSQLResult(
+            natural_language_query="which brand has highest ratings",
+            generated_sql="SELECT brand, AVG(avg_rating) FROM products GROUP BY brand LIMIT 50",
+            validation_passed=True,
+            rows=[{"brand": "Dell", "avg_rating": 4.6}],
+            rows_returned=1,
+        )
+        with (
+            patch("app.search.router.classify_query", return_value=_analytical_routing()),
+            patch("app.search.router.run_nl_to_sql", new_callable=AsyncMock, return_value=nl_result),
+        ):
             resp = client.post("/api/search/", json={"query": "which brand has highest ratings"})
 
-        assert resp.status_code == 501
-        body = resp.json()["detail"]
-        assert body["query_type"] == "ANALYTICAL"
-        assert "NL-to-SQL" in body["message"]
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["question"] == "which brand has highest ratings"
+        assert body["rows_returned"] == 1
 
-    def test_hybrid_query_returns_501(self, client: TestClient):
-        with patch("app.search.router.classify_query", return_value=_hybrid_routing()):
-            resp = client.post("/api/search/", json={"query": "best laptop under 80k with good battery"})
+    def test_analytical_validation_failure_returns_422(self, client: TestClient):
+        from app.schemas.search import NLToSQLResult
+        nl_result = NLToSQLResult(
+            natural_language_query="bad query",
+            generated_sql="DROP TABLE products",
+            validation_passed=False,
+            rows=[],
+            rows_returned=0,
+        )
+        with (
+            patch("app.search.router.classify_query", return_value=_analytical_routing()),
+            patch("app.search.router.run_nl_to_sql", new_callable=AsyncMock, return_value=nl_result),
+        ):
+            resp = client.post("/api/search/", json={"query": "bad query"})
 
-        assert resp.status_code == 501
-        body = resp.json()["detail"]
+        assert resp.status_code == 422
+
+    def test_hybrid_query_routes_to_hybrid_search(self, client: TestClient):
+        with (
+            patch("app.search.router.classify_query", return_value=_hybrid_routing()),
+            patch(
+                "app.search.router.hybrid_search",
+                new_callable=AsyncMock,
+                return_value=_CANDIDATE_POOL[:3],
+            ),
+        ):
+            resp = client.post(
+                "/api/search/", json={"query": "best laptop under 80k with good battery"}
+            )
+
+        assert resp.status_code == 200
+        body = resp.json()
         assert body["query_type"] == "HYBRID"
+        assert len(body["results"]) == 3
 
-    def test_501_detail_contains_routing_reasoning(self, client: TestClient):
-        with patch("app.search.router.classify_query", return_value=_analytical_routing()):
-            resp = client.post("/api/search/", json={"query": "average price of Dell laptops"})
+    def test_hybrid_query_returns_search_response_shape(self, client: TestClient):
+        with (
+            patch("app.search.router.classify_query", return_value=_hybrid_routing()),
+            patch(
+                "app.search.router.hybrid_search",
+                new_callable=AsyncMock,
+                return_value=_CANDIDATE_POOL[:2],
+            ),
+        ):
+            resp = client.post("/api/search/", json={"query": "best Dell laptop under 80k"})
 
-        detail = resp.json()["detail"]
-        assert detail["reasoning"] == "needs aggregation"
+        body = resp.json()
+        assert body["query"] == "best Dell laptop under 80k"
+        assert body["total"] == 2
+        assert "results" in body
 
     def test_classify_query_is_called_with_the_query_string(self, client: TestClient):
         with (
@@ -128,8 +175,17 @@ class TestQueryRouting:
         mock_classify.assert_called_once_with("portable travel laptop")
 
     def test_embed_not_called_for_analytical_query(self, client: TestClient):
+        from app.schemas.search import NLToSQLResult
+        nl_result = NLToSQLResult(
+            natural_language_query="how many laptops are under 50k",
+            generated_sql="SELECT COUNT(*) FROM products WHERE current_price < 50000 LIMIT 50",
+            validation_passed=True,
+            rows=[{"count": 12}],
+            rows_returned=1,
+        )
         with (
             patch("app.search.router.classify_query", return_value=_analytical_routing()),
+            patch("app.search.router.run_nl_to_sql", new_callable=AsyncMock, return_value=nl_result),
             patch("app.search.router.embed") as mock_embed,
         ):
             client.post("/api/search/", json={"query": "how many laptops are under 50k"})

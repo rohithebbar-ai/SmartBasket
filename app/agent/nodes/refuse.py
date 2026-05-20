@@ -1,15 +1,20 @@
+"""
+refuse — terminal node for OUT_OF_SCOPE queries.
+
+No LLM call. Sets a static response and returns immediately.
+The graph routes directly to END after this node — history is not saved
+because out-of-scope turns are not useful context for future retrieval.
+
+Writes to state: final_response
+"""
+
 from app.agent.state import ShopSenseState
 
+_REFUSAL_MESSAGE = (
+    "I can help you find electronics — laptops, headphones, phones and more. "
+    "What are you looking for?"
+)
 
-async def refuse(state: ShopSenseState) -> ShopSenseState:
-    """
-    Returns a polite refusal for OUT_OF_SCOPE queries.
 
-    No LLM call — response is a static template. Exits immediately.
-
-    Reads:  state.intent (must be OUT_OF_SCOPE)
-    Writes: state.final_response
-
-    Outgoing edge: → END (does not save to history)
-    """
-    raise NotImplementedError("Implement in Week 3 — LangGraph agent phase (Days 12–13)")
+def refuse(state: ShopSenseState) -> dict:
+    return {"final_response": _REFUSAL_MESSAGE}

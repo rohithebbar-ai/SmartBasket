@@ -7,10 +7,11 @@ async def hybrid_search(state: ShopSenseState) -> ShopSenseState:
     and semantic ranking.
 
     Delegates to app.search.hybrid_search.hybrid_search().
-    SQL constrains the candidate set; vector search ranks within it.
+    Uses RRF (Reciprocal Rank Fusion) to merge SQL and vector rankings —
+    rrf_score = 1/(60 + sql_rank) + 1/(60 + vector_rank).
 
     Reads:  state.messages (last user message)
-    Writes: state.search_results (filtered by SQL, ranked by vector similarity)
+    Writes: state.search_results (RRF-merged results, sorted by rrf_score desc)
 
     Outgoing edge: → personalise
     """

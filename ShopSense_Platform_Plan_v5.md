@@ -30,6 +30,8 @@
 18. [Success Criteria &amp; Evaluation](#18-success-criteria--evaluation)
 19. [Agentic Tool Calling — MCP Server &amp; Full Tool Registry](#19-agentic-tool-calling--shopsense-as-an-action-taking-agent)
 20. [Scaffold Decisions, Environment Config &amp; Auth Design](#20-scaffold-decisions-environment-config--auth-design)
+21. [Architectural Improvements — Phased Plan](#21-architectural-improvements--phased-plan)
+22. [Architectural Gaps — Identified and Resolved](#22-architectural-gaps--identified-and-resolved)
 
 ---
 
@@ -340,6 +342,32 @@ Respond with JSON only:
 
 ### 5.3 The NL-to-SQL Engine
 
+**Design principle:** One centralized function `run_nl_to_sql()` in `app/search/nl_to_sql.py`. Every caller — admin analytics, hybrid search, user order history — goes through this single function. Validation loop, retry logic, and audit logging live here once.
+
+```python
+async def run_nl_to_sql(
+    query: str,
+    schema_scope: list[str],    # which tables to inject — caller decides
+    user_id: str | None = None, # if set, engine appends WHERE user_id = :user_id (mandatory guard)
+    use_few_shot: bool = True,  # pull 2-3 similar past queries from nl_sql_audit table
+) -> NLToSQLResult:
+```
+
+**Tables in scope by caller:**
+
+| Caller | schema_scope | user_id guard |
+|---|---|---|
+| Admin analytics (`/api/analytics/`) | products, reviews, price_history, orders | None (admin sees all) |
+| Hybrid search | products, reviews, price_history | None |
+| User order history (Day 12–13, agent) | orders | Mandatory — always set |
+
+**Few-shot retrieval from audit table:** When `use_few_shot=True`, the engine queries `nl_sql_audit` for the 2–3 most similar past queries (by text similarity) and injects them as worked examples into the prompt. This improves accuracy on your specific schema over time without fine-tuning. Activate from Day 10 — even with 10 rows it helps.
+
+**Extended table scope (Day 10):** `products`, `reviews`, and `price_history` are all in scope from the start. This enables:
+- `"which brand has highest average rating?"` → aggregates `reviews`
+- `"how has the Dell XPS 15 price changed this week?"` → queries `price_history`
+- `"which laptops have battery_sentiment below 3.0?"` → aggregates sentiment columns in `reviews`
+
 For ANALYTICAL and HYBRID queries, the NL-to-SQL engine generates safe, validated SQL against the ShopSense PostgreSQL schema.
 
 **Schema injection:** The full table definitions are injected into every prompt so the model knows the exact column names, types, and JSONB access patterns.
@@ -446,58 +474,128 @@ Resume line: *"Built a hybrid retrieval system combining Qdrant semantic search 
 
 ## 6. LangGraph Agent — Updated Flow
 
-The agent now has three retrieval paths instead of one. The query router determines which path runs.
+The agent has three retrieval paths for information queries, a full agentic purchase flow with human-in-the-loop gates, and a proactive price intelligence branch. The intent classifier now recognises ten intents.
 
 ```mermaid
 flowchart TD
     START([User Message\n+ session_id + user_id]) --> LOAD[Load Context\nRedis: last 10 turns\nPostgreSQL: user preferences]
 
-    LOAD --> CLASSIFY[classify_intent\nclaude-3-haiku (Bedrock)\nPRODUCT_SEARCH / COMPARE\nEXPLAIN / OUT_OF_SCOPE]
+    LOAD --> CLASSIFY[classify_intent\nclaude-3-haiku Bedrock\nPRODUCT_SEARCH / COMPARE / EXPLAIN\nPURCHASE_INTENT / CHECKOUT\nORDER_STATUS / POST_PURCHASE\nWISHLIST_ACTION / ADMIN_ACTION\nOUT_OF_SCOPE]
 
     CLASSIFY --> ROUTE_INTENT{Intent Router}
 
-    ROUTE_INTENT -->|PRODUCT_SEARCH\nor EXPLAIN| QUERY_ROUTER[query_type_router\nclaude-3-haiku (Bedrock)\nSEMANTIC / ANALYTICAL / HYBRID]
-
-    ROUTE_INTENT -->|PRODUCT_COMPARE| COMPARE[fetch and compare\n2-3 products\nSide-by-side analysis]
-
+    ROUTE_INTENT -->|PRODUCT_SEARCH or EXPLAIN| QUERY_ROUTER[query_type_router\nclaude-3-haiku Bedrock\nSEMANTIC / ANALYTICAL / HYBRID]
+    ROUTE_INTENT -->|COMPARE| COMPARE[compare_products\n2-3 products\nSpecs + sentiment side-by-side]
+    ROUTE_INTENT -->|PURCHASE_INTENT| PURCHASE[handle_purchase_intent\ncheck_stock_status tool]
+    ROUTE_INTENT -->|CHECKOUT| CHECKOUT_NODE[checkout flow\nget_saved_payment_methods\ncalculate_order_total]
+    ROUTE_INTENT -->|ORDER_STATUS| ORDER[get_order_status\nget_tracking_info tools]
+    ROUTE_INTENT -->|POST_PURCHASE| POST[cancel_order /\ninitiate_return /\nget_refund_status tools]
+    ROUTE_INTENT -->|WISHLIST_ACTION| WISH[add_to_wishlist /\nget_wishlist /\nmove_to_cart tools]
+    ROUTE_INTENT -->|ADMIN_ACTION| ADMIN[admin tools\nupdate_stock / create_discount\nsend_bulk_notification]
     ROUTE_INTENT -->|OUT_OF_SCOPE| REFUSE[Polite refusal\nNo LLM call]
 
     QUERY_ROUTER -->|SEMANTIC| SEM[semantic_search\nQdrant + flashrank\nTop 10 products]
-
-    QUERY_ROUTER -->|ANALYTICAL| ANAL[nl_to_sql_search\nGenerate SQL\nValidate\nExecute on PostgreSQL]
-
-    QUERY_ROUTER -->|HYBRID| HYB[hybrid_search\nSQL constrains candidates\nVector search ranks\nMerge results]
+    QUERY_ROUTER -->|ANALYTICAL| ANAL[nl_to_sql_search\nGenerate SQL / Validate\nExecute on PostgreSQL]
+    QUERY_ROUTER -->|HYBRID| HYB[hybrid_search\nRRF merge\nSQL rank + vector rank]
 
     SEM --> PERSONAL[personalise\nBoost preferred brands\nAdjust by price range]
     ANAL --> SYNTH
     HYB --> PERSONAL
     COMPARE --> SYNTH
-
-    PERSONAL --> SYNTH[synthesise_response\nclaude-3-5-sonnet (Bedrock)\nStream token by token]
-
-    SYNTH --> SAVE[save_history\nRedis: history:session_id\nAppend turn]
-
+    PERSONAL --> SYNTH[synthesise_response\nclaude-3-5-sonnet Bedrock\nStream token by token]
+    SYNTH --> SAVE[save_history\nRedis: history:session_id]
     SAVE --> END([Streaming Response])
     REFUSE --> END
 
+    PURCHASE --> PRICE_CHECK[check_price_trend\nget_price_history tool\nCompare vs last week]
+    PRICE_CHECK --> PRESENT[present_price_insight\nHigh demand surge detected?\nWait or Proceed?]
+    PRESENT --> USER_DECISION{await_user_decision\nWAIT / PROCEED}
+
+    USER_DECISION -->|WAIT| ALERT[set_price_alert tool\nconfirm_email_address\nSame email as login?]
+    ALERT --> CONFIRM_ALERT[await_confirmation\nWRITE gate]
+    CONFIRM_ALERT --> SAVE_ALERT[save alert + ack user]
+    SAVE_ALERT --> SAVE
+
+    USER_DECISION -->|PROCEED| PAY[get_saved_payment_methods\ncalculate_order_total\nShow full bill]
+    PAY --> CONFIRM_PAY[await_confirmation\nWRITE gate\nShall I place this order?]
+    CONFIRM_PAY --> STRIPE[Stripe Elements\nNew card iframe or saved card]
+    STRIPE --> PROCESS[process_payment tool]
+    PROCESS --> EMAIL[send_confirmation_email\nauto-executes post-payment]
+    EMAIL --> SAVE
+
+    ORDER --> SAVE
+    POST --> CONFIRM_POST[await_confirmation\nfor cancel / return\nWRITE gate]
+    CONFIRM_POST --> SAVE
+    WISH --> SAVE
+    ADMIN --> CONFIRM_ADMIN[await_confirmation\nfor write admin actions]
+    CONFIRM_ADMIN --> SAVE
+
     SYNTH -.->|Full trace| LANGSMITH[LangSmith\nAll nodes traced]
 ```
+
+### 6.1 The `await_confirmation` Node — Human-in-the-Loop Gate
+
+Every write operation in the graph passes through `await_confirmation` before executing. This node pauses the graph and waits for the next user message. That message is classified by a simple intent router as CONFIRM, DECLINE, or AMBIGUOUS. Only a clear affirmative ("yes", "confirm", "go ahead", "proceed") routes to tool execution. A DECLINE cancels and explains. An AMBIGUOUS response routes back to the agent to ask for clarification. The graph never interprets silence or vague responses as consent.
+
+Read tools (`check_stock_status`, `get_price_history`, `get_order_status`, `get_saved_payment_methods`) execute immediately — no gate needed. Write tools (`add_to_cart`, `set_price_alert`, `process_payment`, `cancel_order`, `initiate_return`) always require their own gate. `send_confirmation_email` is the one exception — it auto-executes as a direct consequence of a successful `process_payment` and needs no separate confirmation.
+
+### 6.2 Proactive Price Intelligence Flow
+
+This is the most important agentic behaviour in the system. After a user expresses purchase intent, the agent does not immediately proceed to checkout. Instead it calls `get_price_history` for the product, computes the percentage change versus the same period last week, and decides whether to surface a price intelligence insight.
+
+**Trigger condition:** current price is more than 3% above the 7-day average. This threshold maps directly to the pricing engine rules — a 5% demand surge or a 10% low-stock surge both clear this bar.
+
+**What the agent says (high-demand example):** *"Before I add this to your cart — this laptop is currently ₹78,750, which is about 5% above its average price this week. That's because it has been viewed 51 times in the last 24 hours and the pricing engine has adjusted upward. You can proceed now, or I can notify you when it drops back to around ₹75,000. What would you prefer?"*
+
+**WAIT branch:** Agent calls `set_price_alert` with the product ID and a target price (current price minus the detected premium). It then confirms the notification email: *"Should I notify you at the email you signed up with — rohit@gmail.com?"* One `await_confirmation` gate, then the alert is saved and the user is acknowledged.
+
+**PROCEED branch:** Normal checkout flow. `get_saved_payment_methods` → `calculate_order_total` (full itemised bill) → `await_confirmation` → Stripe Elements (if new card) → `process_payment` → `send_confirmation_email`.
+
+**If price is normal (within 3% of 7-day average):** The agent skips the price insight entirely and goes directly to add_to_cart. No unnecessary friction.
+
+### 6.3 PURCHASE_INTENT — The Missing Intent Class (Now Fixed)
+
+The original intent classifier only knew PRODUCT_SEARCH, COMPARE, EXPLAIN, and OUT_OF_SCOPE. This meant any message like "okay I'll take it" or "add this to my cart" was being misclassified as PRODUCT_SEARCH and routed to the retrieval pipeline. The classifier now handles ten intents. The additional six:
+
+- `PURCHASE_INTENT` — user has decided on a product and wants to buy or add to cart. Triggers the proactive price intelligence flow.
+- `CHECKOUT` — user is already in the checkout flow and responding to a payment prompt.
+- `ORDER_STATUS` — "where is my order", "what's the status of order #123".
+- `POST_PURCHASE` — "I want to return this", "can I cancel my order", "when does my refund arrive".
+- `WISHLIST_ACTION` — "save this for later", "what did I wishlist last time", "move my wishlist item to cart".
+- `ADMIN_ACTION` — admin-only intents: "mark the Dell XPS as 50 units in stock", "put Sony headphones on 15% sale".
 
 **Updated ShopSenseState:**
 
 ```python
 class ShopSenseState(TypedDict):
-    messages: List[BaseMessage]      # Conversation history
-    intent: str                      # PRODUCT_SEARCH, COMPARE, EXPLAIN, OUT_OF_SCOPE
-    query_type: str                  # SEMANTIC, ANALYTICAL, HYBRID
-    search_results: List[Dict]       # From semantic or hybrid path
-    sql_results: List[Dict]          # From analytical path
-    generated_sql: str               # For audit/debugging
-    user_preferences: Dict           # From users module
+    # Existing retrieval fields
+    messages: List[BaseMessage]
+    intent: str          # One of ten intents — see Section 6.3
+    query_type: str      # SEMANTIC, ANALYTICAL, HYBRID
+    search_results: List[Dict]
+    sql_results: List[Dict]
+    generated_sql: str
+    user_preferences: Dict
     session_id: str
     user_id: str
     final_response: str
-    sources: List[str]               # Product IDs or table names cited
+    sources: List[str]
+
+    # Tool-calling fields (Section 19.6)
+    pending_tool: str
+    pending_tool_args: Dict
+    pending_tool_description: str
+    tool_result: Dict
+    awaiting_confirmation: bool
+    confirmation_context: str
+    order_id: str
+    cart_summary: Dict
+
+    # Proactive price intelligence fields
+    price_trend_pct: float       # % change vs 7-day average — positive = elevated
+    price_insight_shown: bool    # Whether the agent surfaced a price warning this turn
+    price_alert_set: bool        # Whether a price alert was saved this session
+    user_decision: str           # WAIT or PROCEED after price insight
 ```
 
 ---
@@ -513,6 +611,7 @@ graph LR
         P1 -->|product.created| T1
         P2[orders module] -->|cart.updated| T2[cart.updated\nPartitions: 3\n7 day retention]
         P2 -->|order.created| T3[order.created\nPartitions: 3\n30 day retention]
+        P2 -->|order.delivered| T5[order.delivered\nPartitions: 1\n30 day retention]
         P3[pricing engine] -->|price.updated| T4[price.updated\nPartitions: 1\n24h retention]
     end
 
@@ -522,8 +621,11 @@ graph LR
         T2 -->|update profile| C2
         T3 -->|update profile\nhighest weight| C2
         T4 -->|recalc cart totals| C3[orders module]
+        T5 -->|schedule review outreach\n3 days post-delivery| C4[post-purchase worker]
     end
 ```
+
+> **`order.delivered` topic** — published by the orders module when courier tracking confirms delivery (or, for the portfolio build, simulated via `PUT /orders/{id}/status`). The post-purchase worker consumes this event, waits 3 days via a Redis-backed delay queue, then initiates a conversational review request via the agent's `submit_review` tool. This closes the post-purchase follow-up loop that Section 19.4 describes but previously had no triggering mechanism.
 
 ### 7.2 Event Payloads
 
@@ -1283,7 +1385,7 @@ By writing these files and running them, you learn:
 
 ```mermaid
 gantt
-    title ShopSense Build Timeline — 3 Weeks
+    title ShopSense Build Timeline — 3 Weeks + Buffer
     dateFormat  YYYY-MM-DD
 
     section Week 1 — Monolith + Base
@@ -1297,13 +1399,16 @@ gantt
     Semantic search + Qdrant           :w2b, after w2a, 1d
     Query router implementation        :w2c, after w2b, 1d
     NL-to-SQL engine + validation      :w2d, after w2c, 1d
-    Hybrid search + aspect sentiment   :w2e, after w2d, 1d
+    Hybrid search RRF + pricing engine :w2e, after w2d, 1d
 
-    section Week 3 — Agent + Deploy
-    LangGraph agent + all nodes        :w3a, 2026-05-26, 2d
-    Pricing engine + personalisation   :w3b, after w3a, 1d
-    React frontend + admin dashboard   :w3c, after w3b, 2d
-    Terraform + EC2 deploy             :w3d, after w3c, 1d
+    section Week 3 — Agent + MCP + Deploy
+    LangGraph agent foundation + await_confirmation :w3a, 2026-05-26, 1d
+    LangGraph retrieval + proactive price flow       :w3b, after w3a, 1d
+    MCP server + Phase 1 checkout tools              :w3c, after w3b, 1d
+    Personalisation worker + post-purchase mechanism :w3d, after w3c, 1d
+    React frontend                                   :w3e, after w3d, 2d
+    Terraform + EC2 deploy                           :w3f, after w3e, 1d
+    Final testing + demo recording                   :w3g, after w3f, 1d
 ```
 
 ### Day-by-Day Milestones
@@ -1317,13 +1422,15 @@ gantt
 | 7      | Real data: Best Buy API + Kaggle reviews ingested, sentiment scores populated        | 2000 real products in database                                                    |
 | 8      | Semantic search: embeddings in Qdrant, search endpoint working                       | "laptop for video editing" returns relevant results                               |
 | 9      | Query router: SEMANTIC / ANALYTICAL / HYBRID classification working                  | Router correctly classifies 10 test queries                                       |
-| 10     | NL-to-SQL: schema-aware SQL generation, validation loop, execution                   | "which brand has highest rating?" returns correct answer from DB                  |
-| 11     | Hybrid search: SQL constrains candidates, vector search ranks within them            | Complex query uses both retrieval paths                                           |
-| 12–13 | LangGraph agent: all nodes including new NL-to-SQL node, streaming working           | Full conversation with streaming response, LangSmith traces visible               |
-| 14     | Pricing engine + personalisation worker                                              | Demand signal flows: view product → Redis counter → price update → Kafka event |
-| 15–16 | React frontend + ShopSense chat widget + admin analytics dashboard                   | Live UI with search, chat, and admin NL-to-SQL panel                              |
-| 17     | Terraform: write files,`terraform plan`, `terraform apply`                       | ShopSense live on AWS EC2 at a public IP                                          |
-| 18     | Final testing + demo recording                                                       | 3-minute demo video ready for portfolio                                           |
+| 10     | NL-to-SQL: centralized engine (`run_nl_to_sql`), schema-aware SQL generation, validation loop, few-shot from audit table, execution. Tables in scope: products, reviews, price_history. User-scoped orders added Day 12–13. | "which brand has highest rating?" and "how has Dell XPS 15 price changed this week?" return correct answers from DB |
+| 11     | Hybrid search: SQL and vector run independently, merged with Reciprocal Rank Fusion (RRF) — not SQL-constrains-then-vector | Complex query uses both retrieval paths, RRF merge visible in response scores |
+| 12     | LangGraph agent foundation: updated intent classifier (10 intents), `state.py` with all fields, simple nodes (`load_context`, `classify_intent`, `route_query_type`, `refuse`, `save_history`), `await_confirmation` node, graph wired with all conditional edges | Graph runs end-to-end with mock node functions. Intent classifier correctly routes PURCHASE_INTENT vs PRODUCT_SEARCH on 10 test queries |
+| 13     | LangGraph retrieval nodes + proactive price flow: `semantic_search`, `nl_to_sql_search`, `hybrid_search`, `personalise`, `synthesise`, streaming endpoint. Add `check_price_trend` + `present_price_insight` nodes and WAIT/PROCEED branch. LangSmith tracing on | Full conversation streaming token by token. LangSmith trace shows all nodes. Ask "I'll take it" after a product recommendation — agent detects PURCHASE_INTENT and runs price check |
+| 14     | MCP server (port 8006) + Phase 1 checkout tools: `check_stock_status`, `add_to_cart`, `get_price_history`, `set_price_alert`, `calculate_order_total`, `process_payment`, `send_confirmation_email`. Wire full checkout flow + Stripe Elements | Complete checkout conversation: find laptop → agent flags high demand price → user chooses wait → alert set. OR user chooses proceed → bill shown → Stripe payment → confirmation email received |
+| 15     | Personalisation worker + post-purchase mechanism: `personalisation_worker.py`, `order.delivered` Kafka topic added to `docker-compose.yml`, post-purchase outreach worker (Redis delay queue, 3-day trigger), `submit_review` MCP tool | View 10 Dell laptops, place order. Check `/users/me/preferences` — see Dell boosted. Simulate order.delivered event — see post-purchase worker schedule the review outreach |
+| 16–17  | React frontend: `ProductGrid`, `SearchBar`, `ProductDetail`, `ShopSenseChat` (streaming), `AdminDashboard`, `Cart`. Vercel deploy | Live Vercel URL. Search works. Chat widget streams. Admin NL-to-SQL panel returns results |
+| 18     | Terraform: write all 4 `.tf` files, `terraform init`, `terraform plan`, `terraform apply` | ShopSense live on AWS EC2 at a public IP. Vercel frontend pointing to EC2 |
+| 19     | Final testing + demo recording: full pytest suite, NL-to-SQL golden set ≥85%, router golden set ≥85%, full checkout flow manual test, 4-minute demo video | Demo video ready. Portfolio page updated with live link and key metrics |
 
 ---
 
@@ -1946,3 +2053,67 @@ The following table supersedes the technology stack table in Section 5, reflecti
 | Frontend            | React + Vite + TypeScript                          | Unchanged                                                       |
 | Deployment          | AWS EC2 + Terraform                                | Unchanged                                                       |
 | Observability       | LangSmith + Prometheus + Grafana                   | Unchanged                                                       |
+
+---
+
+## 22. Architectural Gaps — Identified and Resolved
+
+This section documents gaps found during design review and how each has been resolved. These are not deferred — they are incorporated into the build plan above.
+
+---
+
+### 22.1 Missing Intent Classes in the Agent Classifier (Resolved — Section 6.3)
+
+**Gap:** The original intent classifier only knew four intents: PRODUCT_SEARCH, COMPARE, EXPLAIN, OUT_OF_SCOPE. Any message expressing purchase intent ("okay I'll take it", "add to cart", "I want to buy this") was being misclassified as PRODUCT_SEARCH and routed to the retrieval pipeline, making the MCP tool-calling flow unreachable.
+
+**Resolution:** The classifier now handles ten intents. Six new ones added: PURCHASE_INTENT, CHECKOUT, ORDER_STATUS, POST_PURCHASE, WISHLIST_ACTION, ADMIN_ACTION. The updated graph diagram and classifier prompt are in Section 6. Build this on Day 12 before any MCP tools — an intent classifier that cannot recognise purchase intent means no tool is ever called regardless of how well the tools are built.
+
+---
+
+### 22.2 Missing `await_confirmation` Node (Resolved — Section 6.1)
+
+**Gap:** Section 19.5 described the human-in-the-loop architecture correctly but the LangGraph graph diagram in Section 6 did not include the `await_confirmation` node. Every write tool in the system depends on this node existing. Building write tools without it is a liability — an agent that charges a card without explicit confirmation is unusable.
+
+**Resolution:** `await_confirmation` is now a first-class node in the graph, appearing before every write tool execution. Read tools bypass it. The node classifies the next user message as CONFIRM, DECLINE, or AMBIGUOUS. See Section 6.1 for the full specification. Build this on Day 12 alongside the graph wiring — it is a prerequisite for all Day 14 MCP work.
+
+---
+
+### 22.3 No Post-Purchase Follow-Up Triggering Mechanism (Resolved — Section 7.1)
+
+**Gap:** Section 19.4 described `submit_review` as a tool the agent uses to proactively request reviews after delivery. But there was no Kafka event for `order.delivered`, no worker that consumed it, and no mechanism to schedule the outreach 3 days post-delivery. The feature was described with no way to trigger it.
+
+**Resolution:** Added `order.delivered` as a fifth Kafka topic (Section 7.1). The orders module publishes this event when order status transitions to DELIVERED (simulated via `PUT /orders/{id}/status` for the portfolio build). A new post-purchase worker consumes this event, uses a Redis delay queue to wait 3 days, then initiates a review conversation via the `submit_review` MCP tool. Build this on Day 15 alongside the personalisation worker.
+
+---
+
+### 22.4 Proactive Price Intelligence Not in the Agent Flow (Resolved — Section 6.2)
+
+**Gap:** The document had `get_price_history` as a tool in Section 19.4 Phase 2 but it was purely reactive — the agent only called it if the user asked about price history. The checkout flow in Section 19.3 went directly from add_to_cart to cross-sell without any price intelligence step.
+
+**Resolution:** The proactive price intelligence flow is now a first-class branch in the LangGraph graph (Section 6.2). After PURCHASE_INTENT is detected, the agent always calls `get_price_history` before proceeding. If the current price is more than 3% above the 7-day average, it surfaces the insight and presents a WAIT or PROCEED choice. If the price is normal, it skips the insight and goes directly to add_to_cart. This is the most distinctive agentic behaviour in the system — an agent that looks out for the customer's money without being asked is genuinely useful.
+
+---
+
+### 22.5 Payment Collection Security (Design Constraint)
+
+**Constraint:** The agent must never ask for card numbers, CVVs, or expiry dates in the chat interface. This is both a PCI compliance requirement and a user trust issue.
+
+**Resolution:** For new card payments, the React frontend renders a Stripe Elements iframe inside the chat bubble. The user enters card details directly into Stripe's hosted field — the ShopSense backend never sees the raw number. Stripe returns a `payment_method_id` token. The agent receives this token and calls `process_payment(cart_id, payment_method_id)`. For saved cards and UPI, the flow goes through `get_saved_payment_methods` which returns masked card details (last 4 digits only). PayPal is excluded from the initial build — it requires a separate OAuth redirect flow incompatible with in-chat payment UX.
+
+---
+
+### 22.6 Build Order for MCP and Agent (Summary)
+
+The correct build sequence for Days 12–14, in dependency order:
+
+1. Updated intent classifier with all 10 intents — everything else depends on correct routing
+2. `await_confirmation` node — every write tool depends on this gate existing
+3. `check_stock_status` (read) — safe to build without a gate, used in purchase flow
+4. `add_to_cart` (write) — requires `await_confirmation`
+5. `get_price_history` (read) — used in proactive price intelligence
+6. `set_price_alert` (write) — requires `await_confirmation`
+7. `calculate_order_total` (read) — used before payment
+8. `process_payment` (write) — requires `await_confirmation`, requires Stripe Elements on frontend
+9. `send_confirmation_email` — auto-executes after successful payment, no gate
+
+Do not build `process_payment` before `await_confirmation` exists. Do not wire `send_confirmation_email` with its own gate — it is the one exception to the write-tool rule because it is a direct consequence of payment confirmation, not an independent consequential action.

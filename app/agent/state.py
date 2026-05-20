@@ -1,42 +1,77 @@
+"""
+ShopSense agent state — passed through every node in the LangGraph graph.
+
+Design notes:
+  - messages is List[Dict] with {"role": "user"|"assistant", "content": str} so the
+    state serialises cleanly to Redis without LangChain BaseMessage overhead.
+  - search_results is List[Dict] rather than List[ProductResult] so the state
+    round-trips through JSON (LangGraph checkpointer) without custom serialisers.
+  - total=False makes every field optional — nodes only write the fields they own;
+    unset fields stay absent rather than holding None sentinels.
+  - price_trend_pct, price_insight_shown, price_alert_set, user_decision are
+    Section 22.4 price-intelligence fields — populated by check_price_trend and
+    consumed by present_price_insight / the WAIT branch.
+"""
+
+from __future__ import annotations
+
 from typing import Any
 from typing_extensions import TypedDict
-from langchain_core.messages import BaseMessage
-
-from app.schemas.search import ProductResult
 
 
-class ShopSenseState(TypedDict):
+class ShopSenseState(TypedDict, total=False):
     # ── Conversation ──────────────────────────────────────────────────────────
-    messages: list[BaseMessage]       # Full conversation history (last 10 turns from Redis)
+    # Each dict: {"role": "user" | "assistant", "content": str}
+    # Loaded from Redis history (last 10 turns) before the graph runs.
+    messages: list[dict[str, str]]
     session_id: str
     user_id: str
+    user_email: str                        # For confirmation emails / Stripe receipts
 
     # ── Routing ───────────────────────────────────────────────────────────────
-    intent: str       # PRODUCT_SEARCH | COMPARE | EXPLAIN | OUT_OF_SCOPE | PURCHASE_INTENT
-    query_type: str   # SEMANTIC | ANALYTICAL | HYBRID
+    # classify_intent writes intent; route_query writes query_type.
+    intent: str      # PRODUCT_SEARCH | COMPARE | EXPLAIN | PURCHASE_INTENT
+                     # CHECKOUT | ORDER_STATUS | POST_PURCHASE
+                     # WISHLIST_ACTION | ADMIN_ACTION | OUT_OF_SCOPE
+    query_type: str  # SEMANTIC | ANALYTICAL | HYBRID
 
     # ── Retrieval results ─────────────────────────────────────────────────────
-    # Typed as ProductResult so Pydantic catches any schema mismatch at the
-    # retrieval boundary — not silently passed as a raw dict to synthesis.
-    search_results: list[ProductResult]
+    # List[Dict] so the state round-trips cleanly through the JSON checkpointer.
+    # Each dict mirrors ProductResult fields: product_id, name, brand, category,
+    # current_price, avg_rating, relevance_score, stock_available, specs, etc.
+    search_results: list[dict[str, Any]]
 
-    # SQL results have arbitrary column names per query — list[dict] is correct here.
+    # SQL results have arbitrary column names per query — list[dict] is correct.
     sql_results: list[dict[str, Any]]
-    generated_sql: str                     # For audit/debugging; logged to nl_sql_audit
+    generated_sql: str                     # Logged to nl_sql_audit; shown in debug mode
 
     # ── Personalisation ───────────────────────────────────────────────────────
-    user_preferences: dict[str, Any]       # From users module; read-only inside agent
+    # Read from users.user_preferences at load_context; never written by agent.
+    user_preferences: dict[str, Any]
 
     # ── Output ────────────────────────────────────────────────────────────────
     final_response: str
-    sources: list[str]   # Product IDs or table names cited in the response
+    sources: list[str]     # product_id strings or table names cited in the response
 
-    # ── Tool calling (Phase 1 — checkout flow, Section 19) ────────────────────
-    pending_tool: str                 # Name of the write tool awaiting confirmation
-    pending_tool_args: dict[str, Any] # Arguments for the pending tool
-    pending_tool_description: str     # Human-readable description shown to the user before confirmation
-    tool_result: dict[str, Any]       # Result returned by the last executed tool
-    awaiting_confirmation: bool       # True when graph is paused at await_confirmation node
-    confirmation_context: str         # What the confirmation is for (displayed to user)
-    order_id: str                     # Set after successful process_payment tool call
-    cart_summary: dict[str, Any]      # Current cart state; passed as context to synthesis
+    # ── Tool calling — checkout flow (Section 19 / Day 14) ───────────────────
+    pending_tool: str                  # Name of the write tool awaiting user confirmation
+    pending_tool_args: dict[str, Any]  # Arguments that will be passed to the tool
+    pending_tool_description: str      # Human-readable description shown before confirmation
+    tool_result: dict[str, Any]        # Result returned by the last executed MCP tool
+
+    awaiting_confirmation: bool        # True when graph is paused at await_confirmation
+    confirmation_context: str          # Context string shown alongside the confirm prompt
+
+    order_id: str                      # Set after successful process_payment call
+    cart_summary: dict[str, Any]       # Current cart state; passed as context to synthesise
+
+    # ── Price intelligence — proactive insight (Section 22.4) ────────────────
+    # Populated by check_price_trend node after PURCHASE_INTENT is detected.
+    # present_price_insight uses these to decide whether to surface an alert.
+    price_trend_pct: float             # % above/below 7-day average (negative = below)
+    price_insight_shown: bool          # True once the price insight has been surfaced
+    price_alert_set: bool              # True if user asked to be alerted on price drop
+
+    # ── Human-in-the-loop decision ────────────────────────────────────────────
+    # Written by await_confirmation after classifying the user's reply.
+    user_decision: str                 # CONFIRM | DECLINE | AMBIGUOUS

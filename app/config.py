@@ -19,6 +19,13 @@ class EmbeddingProvider(str, Enum):
     NVIDIA = "NVIDIA"
 
 
+class LLMProvider(str, Enum):
+    BEDROCK = "bedrock"
+    GROQ = "groq"
+    GEMINI = "gemini"
+    MOCK = "mock"
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -66,6 +73,21 @@ class Settings(BaseSettings):
     kafka_topic_cart_updated: str = "cart.updated"
     kafka_topic_order_created: str = "order.created"
     kafka_topic_price_updated: str = "price.updated"
+
+    # ── LLM Provider ─────────────────────────────────────────────────────────
+    # Switch LLM_PROVIDER in .env — no code change needed.
+    # bedrock = prod (Claude); groq = dev default; gemini = dev alt; mock = CI
+    llm_provider: LLMProvider = LLMProvider.GROQ
+
+    # Groq (dev default) — https://console.groq.com/keys
+    groq_key: str | None = None
+    groq_fast_model: str = "llama-3.1-8b-instant"
+    groq_generation_model: str = "llama-3.3-70b-versatile"
+
+    # Gemini (dev alt) — https://aistudio.google.com/apikey
+    gemini_key: str | None = None
+    gemini_fast_model: str = "gemini-2.5-flash-lite"
+    gemini_generation_model: str = "gemini-2.5-flash"
 
     # ── AWS / Bedrock ─────────────────────────────────────────────────────────
     # Auth priority: instance role → aws_profile → explicit keys.

@@ -1,23 +1,52 @@
+"""
+route_query — third node in the graph (runs after classify_intent).
+
+Delegates to the existing classify_query() function from app/search/query_router
+so routing logic lives in exactly one place. The agent graph uses the
+history-aware QUERY_TYPE_ROUTER_PROMPT; the stateless /search endpoint uses
+QUERY_ROUTER_PROMPT. classify_query() accepts an optional history string to
+switch between the two.
+
+Only runs for PRODUCT_SEARCH and EXPLAIN intents — other intents skip this node
+via the conditional edge in graph.py.
+
+Defaults to SEMANTIC on any error — safe fallback (vector search can handle
+most queries; it just won't use SQL).
+
+Writes to state: query_type
+"""
+
+import logging
+
 from app.agent.state import ShopSenseState
-from app.schemas.llm import QueryRouterOutput
+from app.search.query_router import classify_query
+
+log = logging.getLogger(__name__)
+
+_DEFAULT_QUERY_TYPE = "SEMANTIC"
 
 
-async def route_query(state: ShopSenseState) -> ShopSenseState:
-    """
-    Classifies the query into a retrieval strategy.
+async def route_query(state: ShopSenseState) -> dict:
+    messages: list[dict[str, str]] = state.get("messages", [])
 
-    Delegates to app.search.query_router.classify_query() — the same classifier
-    used by the direct /search endpoint, keeping routing logic in one place.
-    classify_query() returns QueryRouterOutput; this node writes only the .type field
-    to state.query_type.
+    if not messages:
+        return {"query_type": _DEFAULT_QUERY_TYPE}
 
-    Model: Bedrock Haiku (~150ms).
-    Reads:  state.messages (last user message), state.intent
-    Writes: state.query_type (str — one of SEMANTIC | ANALYTICAL | HYBRID)
+    current_message = messages[-1].get("content", "")
 
-    Query type values and outgoing edges:
-      SEMANTIC    → semantic_search
-      ANALYTICAL  → nl_to_sql_search
-      HYBRID      → hybrid_search
-    """
-    raise NotImplementedError("Implement in Week 3 — LangGraph agent phase (Days 12–13)")
+    # Build a short history string from the prior 4 messages (2 turns).
+    prior = messages[:-1][-4:]
+    history = (
+        "\n".join(f"{m['role'].capitalize()}: {m['content']}" for m in prior)
+        if prior
+        else ""
+    )
+
+    try:
+        result = await classify_query(current_message, history=history)
+        query_type = result.type
+    except Exception as exc:
+        log.warning("Query type routing failed (%s) — defaulting to %s", exc, _DEFAULT_QUERY_TYPE)
+        query_type = _DEFAULT_QUERY_TYPE
+
+    return {"query_type": query_type}

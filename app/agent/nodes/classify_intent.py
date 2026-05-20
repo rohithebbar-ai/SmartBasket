@@ -1,23 +1,63 @@
+"""
+classify_intent — second node in the graph.
+
+Reads the latest user message from state["messages"], formats up to 5 prior
+turns as history context, and calls the intent classifier prompt via call_llm.
+
+Validated against the 10 valid intent strings via IntentOutput. On any error
+(LLM failure, parse error, unexpected value) defaults to PRODUCT_SEARCH rather
+than crashing — the graph must never halt on a classification failure.
+
+Writes to state: intent
+"""
+
+import logging
+
+from app.agent.prompts import INTENT_CLASSIFIER_PROMPT
 from app.agent.state import ShopSenseState
+from app.llm import call_llm
 from app.schemas.llm import IntentOutput
 
+log = logging.getLogger(__name__)
 
-async def classify_intent(state: ShopSenseState) -> ShopSenseState:
-    """
-    Classifies the user's latest message into one of five intents.
+_DEFAULT_INTENT = "PRODUCT_SEARCH"
+_VALID_INTENTS = set(IntentOutput.model_fields["intent"].annotation.__args__)
 
-    Model: Bedrock Haiku (~200ms). Reads INTENT_CLASSIFICATION_PROMPT from prompts.py.
-    LLM response is parsed immediately into IntentOutput — ValidationError fires at the
-    boundary if the model returns an unexpected intent string.
+# Number of prior messages to include as history context (keeps prompt short).
+_HISTORY_WINDOW = 5
 
-    Reads:  state.messages (last user message)
-    Writes: state.intent (str — the .intent field from IntentOutput)
 
-    Intent values and outgoing edges:
-      PRODUCT_SEARCH  → route_query
-      EXPLAIN         → route_query
-      COMPARE         → compare_products
-      OUT_OF_SCOPE    → refuse
-      PURCHASE_INTENT → handle_purchase_intent (Phase 1, Section 19)
-    """
-    raise NotImplementedError("Implement in Week 3 — LangGraph agent phase (Days 12–13)")
+def _format_history(messages: list[dict[str, str]], exclude_last: int = 1) -> str:
+    """Formats prior messages (excluding the current one) as plain text."""
+    prior = messages[:-exclude_last] if exclude_last else messages
+    window = prior[-_HISTORY_WINDOW:]
+    if not window:
+        return "(no prior conversation)"
+    return "\n".join(f"{m['role'].capitalize()}: {m['content']}" for m in window)
+
+
+async def classify_intent(state: ShopSenseState) -> dict:
+    messages: list[dict[str, str]] = state.get("messages", [])
+
+    if not messages:
+        log.warning("classify_intent called with empty messages — defaulting to %s", _DEFAULT_INTENT)
+        return {"intent": _DEFAULT_INTENT}
+
+    current_message = messages[-1].get("content", "")
+    history = _format_history(messages, exclude_last=1)
+
+    prompt = INTENT_CLASSIFIER_PROMPT.format(history=history, message=current_message)
+
+    try:
+        raw = await call_llm(prompt, tier="fast", max_tokens=150, temperature=0.0)
+        output = IntentOutput.model_validate_json(raw)
+        intent = output.intent
+    except Exception as exc:
+        log.warning("Intent classification failed (%s) — defaulting to %s", exc, _DEFAULT_INTENT)
+        intent = _DEFAULT_INTENT
+
+    if intent not in _VALID_INTENTS:
+        log.warning("Unexpected intent %r — defaulting to %s", intent, _DEFAULT_INTENT)
+        intent = _DEFAULT_INTENT
+
+    return {"intent": intent}

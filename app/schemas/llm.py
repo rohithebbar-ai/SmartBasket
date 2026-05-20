@@ -25,8 +25,19 @@ class QueryRouterOutput(BaseModel):
 
 
 class IntentOutput(BaseModel):
-    """Output of the intent classifier (INTENT_CLASSIFICATION_PROMPT, Haiku ~200ms)."""
-    intent: Literal["PRODUCT_SEARCH", "COMPARE", "EXPLAIN", "OUT_OF_SCOPE", "PURCHASE_INTENT"]
+    """Output of the intent classifier (INTENT_CLASSIFIER_PROMPT, fast tier ~200ms)."""
+    intent: Literal[
+        "PRODUCT_SEARCH",
+        "COMPARE",
+        "EXPLAIN",
+        "PURCHASE_INTENT",
+        "CHECKOUT",
+        "ORDER_STATUS",
+        "POST_PURCHASE",
+        "WISHLIST_ACTION",
+        "ADMIN_ACTION",
+        "OUT_OF_SCOPE",
+    ]
     reasoning: str
 
 

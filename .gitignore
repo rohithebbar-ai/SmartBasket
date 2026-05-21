@@ -48,12 +48,17 @@ infra/terraform/.terraform.lock.hcl
 *.swo
 .DS_Store
 
+# Claude Code
+.claude/
+.claudeignore
+CLAUDE.md
+skills/
+
 # Data (large files — add specific files to git explicitly)
 data/raw/
 data/processed/
 *.csv
 *.parquet
-.claudeignore
 
 # Logs
 *.log

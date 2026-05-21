@@ -90,7 +90,7 @@ async def get_delivery_estimate(body: ProductIdBody) -> dict:
 
 @router.post("/add_to_cart")
 async def add_to_cart(body: AddToCartBody) -> dict:
-    redis = await get_redis_client()
+    redis = get_redis_client()
     async with AsyncSessionLocal() as db:
         cart = await order_service.add_to_cart(
             redis, db,

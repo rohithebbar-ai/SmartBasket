@@ -20,7 +20,10 @@ import logging
 
 from app.agent.prompts import SYNTHESIS_PROMPT
 from app.agent.state import ShopSenseState
+from app.database import AsyncSessionLocal
 from app.llm import call_llm
+from app.redis_client import get_redis_client
+from sqlalchemy import text
 
 log = logging.getLogger(__name__)
 
@@ -92,6 +95,49 @@ def _build_budget_overrun_section(state: ShopSenseState) -> str:
     return "\n".join(lines)
 
 
+async def _build_review_nudge(state: ShopSenseState) -> str:
+    """
+    Returns a one-line review prompt if the user has unreviewed delivered products
+    and the current intent is informational (PRODUCT_SEARCH or COMPARE).
+    Deletes the Redis pending_review key so the nudge only appears once.
+    Returns "" on any failure or when the conditions are not met.
+    """
+    pending = state.get("pending_review_products") or []
+    intent = state.get("intent", "")
+    if not pending or intent not in ("PRODUCT_SEARCH", "COMPARE"):
+        return ""
+
+    user_id = state.get("user_id", "")
+    product_names: list[str] = []
+    try:
+        async with AsyncSessionLocal() as db:
+            rows = (
+                await db.execute(
+                    text("SELECT name FROM products WHERE id = ANY(:ids) LIMIT 3"),
+                    {"ids": pending[:3]},
+                )
+            ).mappings().all()
+            product_names = [row["name"] for row in rows]
+    except Exception:
+        pass
+
+    if not product_names:
+        product_names = ["your recent purchase"]
+
+    names_str = " and ".join(product_names)
+    nudge = f"By the way — how was {names_str}? You can leave a review anytime."
+
+    # Delete the key so the nudge shows only once per delivery
+    if user_id:
+        try:
+            redis = get_redis_client()
+            await redis.delete(f"pending_review:{user_id}")
+        except Exception:
+            pass
+
+    return nudge
+
+
 async def synthesise(state: ShopSenseState) -> dict:
     # If validation failed in nl_to_sql_search, final_response is already set
     if state.get("final_response"):
@@ -120,11 +166,16 @@ async def synthesise(state: ShopSenseState) -> dict:
         user_preferences=json.dumps(user_preferences) if user_preferences else "none",
     )
 
+    review_nudge = await _build_review_nudge(state)
+
     try:
         response = await call_llm(prompt, tier="generation", max_tokens=450, temperature=0.3)
     except Exception as exc:
         log.error("Synthesis LLM call failed: %s", exc)
         response = _FALLBACK_RESPONSE
+
+    if review_nudge:
+        response = f"{review_nudge}\n\n{response}"
 
     sources = state.get("sources") or []
     return {

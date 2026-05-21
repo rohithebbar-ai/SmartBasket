@@ -87,7 +87,7 @@ async def _calculate_total_internal(user_id: str, coupon_code: str | None = None
     Core billing logic — called by both the endpoint and process_payment.
     Server-side only: total is never accepted from the client.
     """
-    redis = await get_redis_client()
+    redis = get_redis_client()
     cart = await order_service.get_cart(redis, uuid.UUID(user_id))
 
     if not cart.items:
@@ -157,7 +157,7 @@ async def process_payment(body: ProcessPaymentBody) -> dict:
 
     if not settings.stripe_secret_key:
         log.warning("Stripe key not configured — using mock order for development")
-        redis = await get_redis_client()
+        redis = get_redis_client()
         async with AsyncSessionLocal() as db:
             order = await order_service.create_order(redis, db, uuid.UUID(body.user_id))
         return {
@@ -196,7 +196,7 @@ async def process_payment(body: ProcessPaymentBody) -> dict:
         return {"success": False, "error": "payment_not_confirmed", "status": intent.status}
 
     # Commit order and clear cart — happens after payment confirmation
-    redis = await get_redis_client()
+    redis = get_redis_client()
     async with AsyncSessionLocal() as db:
         order = await order_service.create_order(redis, db, uuid.UUID(body.user_id))
 

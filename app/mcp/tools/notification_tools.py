@@ -39,6 +39,8 @@ class SubmitReviewBody(BaseModel):
     user_id: str
     product_id: str
     order_id: str
+    rating: int
+    review_text: str = ""
 
 
 # ── send_confirmation_email ───────────────────────────────────────────────────
@@ -139,15 +141,63 @@ async def set_price_alert(body: PriceAlertBody) -> dict:
     }
 
 
-# ── submit_review (stub) ──────────────────────────────────────────────────────
+# ── submit_review ─────────────────────────────────────────────────────────────
+
+_INSERT_REVIEW_SQL = text("""
+    INSERT INTO order_reviews (order_id, user_id, rating, review_text)
+    VALUES (:order_id, :user_id, :rating, :review_text)
+    ON CONFLICT (order_id) DO UPDATE
+        SET rating      = EXCLUDED.rating,
+            review_text = EXCLUDED.review_text
+    RETURNING id
+""")
+
+_UPDATE_AVG_RATING_SQL = text("""
+    UPDATE products
+    SET avg_rating = (
+        SELECT ROUND(AVG(r.rating::numeric), 2)
+        FROM order_reviews r
+        JOIN orders o ON o.id = r.order_id
+        WHERE o.items @> jsonb_build_array(jsonb_build_object('product_id', :product_id::text))
+    )
+    WHERE id = :product_id
+""")
+
 
 @router.post("/submit_review")
 async def submit_review(body: SubmitReviewBody) -> dict:
     """
-    Stub — real implementation queues a review request after order delivery
-    confirmation via the post-purchase worker (Redis delay queue, 3-day trigger).
+    Saves the review to order_reviews and recomputes products.avg_rating.
+    Idempotent — re-submitting the same order_id updates the existing row.
     """
-    return {
-        "queued": True,
-        "message": "Review request will be sent after delivery confirmation.",
-    }
+    if not (1 <= body.rating <= 5):
+        return {"saved": False, "reason": "rating must be between 1 and 5"}
+
+    review_id: str = ""
+    try:
+        async with AsyncSessionLocal() as db:
+            row = (
+                await db.execute(
+                    _INSERT_REVIEW_SQL,
+                    {
+                        "order_id":    body.order_id,
+                        "user_id":     body.user_id,
+                        "rating":      body.rating,
+                        "review_text": body.review_text,
+                    },
+                )
+            ).mappings().first()
+            await db.commit()
+            review_id = str(row["id"]) if row else ""
+
+            # Best-effort avg_rating update — failure here is non-fatal
+            try:
+                await db.execute(_UPDATE_AVG_RATING_SQL, {"product_id": body.product_id})
+                await db.commit()
+            except Exception as exc:
+                log.warning("avg_rating update failed for product %s: %s", body.product_id, exc)
+    except Exception as exc:
+        log.error("submit_review DB error: %s", exc)
+        return {"saved": False, "reason": str(exc)}
+
+    return {"saved": True, "review_id": review_id}

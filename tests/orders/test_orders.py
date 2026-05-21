@@ -192,7 +192,7 @@ class TestCreateOrder:
             patch("app.orders.router.service.create_order", new=AsyncMock(return_value=_order_response())),
             patch("app.orders.router.publish_order_created", new=AsyncMock()),
         ):
-            resp = client.post("/api/orders/orders")
+            resp = client.post("/api/orders")
 
         assert resp.status_code == 201
         body = resp.json()
@@ -207,7 +207,7 @@ class TestCreateOrder:
             patch("app.orders.router.service.create_order", new=AsyncMock(return_value=_order_response())),
             patch("app.orders.router.publish_order_created", new=mock_publish),
         ):
-            client.post("/api/orders/orders")
+            client.post("/api/orders")
 
         mock_publish.assert_called_once()
         call_kwargs = mock_publish.call_args.kwargs
@@ -219,7 +219,7 @@ class TestCreateOrder:
             patch("app.orders.router.service.create_order", new=AsyncMock(side_effect=ValueError("Cannot create order from an empty cart"))),
             patch("app.orders.router.publish_order_created", new=AsyncMock()),
         ):
-            resp = client.post("/api/orders/orders")
+            resp = client.post("/api/orders")
 
         assert resp.status_code == 400
         assert "empty cart" in resp.json()["detail"]
@@ -231,7 +231,7 @@ class TestCreateOrder:
             patch("app.orders.router.service.create_order", new=AsyncMock(side_effect=ValueError("empty cart"))),
             patch("app.orders.router.publish_order_created", new=mock_publish),
         ):
-            client.post("/api/orders/orders")
+            client.post("/api/orders")
 
         mock_publish.assert_not_called()
 
@@ -242,7 +242,7 @@ class TestGetOrder:
     def test_returns_order_for_owner(self):
         client = _make_client()
         with patch("app.orders.router.service.get_order_by_id", new=AsyncMock(return_value=_order_response())):
-            resp = client.get(f"/api/orders/orders/{ORDER_ID}")
+            resp = client.get(f"/api/orders/{ORDER_ID}")
 
         assert resp.status_code == 200
         assert resp.json()["id"] == str(ORDER_ID)
@@ -250,7 +250,7 @@ class TestGetOrder:
     def test_order_not_found_returns_404(self):
         client = _make_client()
         with patch("app.orders.router.service.get_order_by_id", new=AsyncMock(return_value=None)):
-            resp = client.get(f"/api/orders/orders/{ORDER_ID}")
+            resp = client.get(f"/api/orders/{ORDER_ID}")
 
         assert resp.status_code == 404
 

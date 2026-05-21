@@ -1,6 +1,7 @@
 import json
 import logging
 import uuid
+from datetime import datetime, timezone
 from decimal import Decimal
 
 from aiokafka import AIOKafkaProducer
@@ -84,3 +85,33 @@ async def publish_order_created(
         logger.debug("order.created published: order_id=%s user_id=%s", order_id, user_id)
     except Exception:
         logger.warning("Failed to publish order.created for order %s", order_id, exc_info=True)
+
+
+async def publish_order_delivered(
+    order_id: str,
+    user_id: str,
+    product_ids: list[str],
+) -> None:
+    """
+    Published after an order is marked as delivered via the admin status endpoint.
+    Consumed by the post-purchase worker to schedule a 3-day review reminder.
+    product_ids are extracted from the order.items JSONB snapshot.
+    Never raises — delivery confirmation must not be rolled back by a Kafka failure.
+    """
+    payload = {
+        "event_type": "order.delivered",
+        "order_id": order_id,
+        "user_id": user_id,
+        "product_ids": product_ids,
+        "delivered_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        producer = await _get_producer()
+        await producer.send_and_wait(
+            settings.kafka_topic_order_delivered,
+            value=payload,
+            key=order_id,
+        )
+        logger.debug("order.delivered published: order_id=%s user_id=%s", order_id, user_id)
+    except Exception:
+        logger.warning("Failed to publish order.delivered for order %s", order_id, exc_info=True)

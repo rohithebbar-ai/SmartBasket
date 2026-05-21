@@ -1,9 +1,10 @@
 import json
 import uuid
+from datetime import datetime, timezone
 from decimal import Decimal
 
 from redis.asyncio import Redis
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.orders.models import Order, OrderStatus
@@ -164,6 +165,31 @@ async def create_order(
         status=order.status,
         created_at=order.created_at,
     )
+
+
+async def deliver_order(
+    db: AsyncSession,
+    order_id: uuid.UUID,
+) -> Order:
+    """
+    Marks an order as delivered and records the delivery timestamp.
+    Called by the admin PUT /orders/{order_id}/status endpoint, which simulates
+    a courier webhook for the portfolio build.
+    Returns the updated Order ORM row.
+    Raises ValueError if the order does not exist.
+    """
+    now = datetime.now(timezone.utc)
+    await db.execute(
+        update(Order)
+        .where(Order.id == order_id)
+        .values(status=OrderStatus.DELIVERED, delivered_at=now)
+    )
+    await db.commit()
+
+    order = await db.scalar(select(Order).where(Order.id == order_id))
+    if order is None:
+        raise ValueError(f"Order {order_id} not found")
+    return order
 
 
 async def get_order_by_id(

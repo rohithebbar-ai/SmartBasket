@@ -88,3 +88,8 @@ class ShopSenseState(TypedDict, total=False):
     # ── Human-in-the-loop decision ────────────────────────────────────────────
     # Written by await_confirmation after classifying the user's reply.
     user_decision: str                 # CONFIRM | DECLINE | AMBIGUOUS
+
+    # ── Post-purchase review prompt ───────────────────────────────────────────
+    # Set by load_context when 'pending_review:{user_id}' exists in Redis.
+    # synthesise prepends a gentle review nudge then deletes the Redis key.
+    pending_review_products: list[str]  # product_id strings awaiting review

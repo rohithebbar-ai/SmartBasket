@@ -2,6 +2,7 @@ import enum
 import uuid
 from datetime import datetime
 from decimal import Decimal
+from typing import Optional
 
 from sqlalchemy import Numeric, String, func
 from sqlalchemy import Enum as SAEnum
@@ -39,3 +40,4 @@ class Order(Base):
         default=OrderStatus.PENDING,
     )
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    delivered_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)

@@ -17,14 +17,17 @@ Active nodes:
   personalise               — score boost by preferred_brands/categories/price/features
   synthesise                — Bedrock Sonnet generation tier; adapts to query_type
   handle_purchase_intent    — DB stock check → delivery estimate → pending_tool payload
+  handle_checkout           — fetches saved card + live cart total → process_payment payload
+  handle_order_status       — DB query for last 3 orders; formats status + items inline
+  handle_post_purchase      — LLM detects REVIEW/RETURN; routes review to await_confirmation
   price_intelligence        — 7-day avg query + elevated-price insight in one pass
   propose_tool_action       — formats confirmation prompt; sets pending_tool_description
+  execute_tool              — dispatches confirmed MCP tool; handles cross-sell + email
   recommend_alternatives    — OOS fallback: semantic search + alternatives response
   summarize_reviews         — aspect-aware review summary from real customer data
 
-Placeholder stubs (order, wishlist, admin, and tool execution flows):
-  handle_order_status, handle_post_purchase,
-  handle_wishlist, handle_admin, execute_tool
+Remaining stubs (wishlist, admin chat — future):
+  handle_wishlist, handle_admin
 
 Checkpointer
 ────────────
@@ -42,6 +45,10 @@ from langgraph.graph import END, START, StateGraph
 from app.agent.nodes.await_confirmation import await_confirmation
 from app.agent.nodes.classify_intent import classify_intent
 from app.agent.nodes.compare_products import compare_products
+from app.agent.nodes.execute_tool import execute_tool
+from app.agent.nodes.handle_checkout import handle_checkout
+from app.agent.nodes.handle_order_status import handle_order_status
+from app.agent.nodes.handle_post_purchase import handle_post_purchase
 from app.agent.nodes.handle_purchase_intent import handle_purchase_intent
 from app.agent.nodes.hybrid_search import hybrid_search
 from app.agent.nodes.load_context import load_context
@@ -58,31 +65,13 @@ from app.agent.nodes.summarize_reviews import summarize_reviews
 from app.agent.nodes.synthesise import synthesise
 from app.agent.state import ShopSenseState
 
-# ── Placeholder stubs ─────────────────────────────────────────────────────────
-# Order tracking, wishlist, admin, and tool execution flows.
+# ── Remaining stubs (handle_wishlist, handle_admin — not yet implemented) ─────
 
-async def _mock_handle_order_status(state: ShopSenseState) -> dict:
-    return {"final_response": "[handle_order_status] stub — not yet implemented"}
+async def _mock_handle_wishlist(_state: ShopSenseState) -> dict:
+    return {"final_response": "Wishlist support is coming soon — stay tuned!"}
 
-async def _mock_handle_post_purchase(state: ShopSenseState) -> dict:
-    # Must set pending_tool_description so await_confirmation has something to interrupt with.
-    return {
-        "pending_tool_description": "[handle_post_purchase] stub — action pending confirmation",
-        "confirmation_context": "post_purchase action",
-    }
-
-async def _mock_handle_wishlist(state: ShopSenseState) -> dict:
-    return {"final_response": "[handle_wishlist] stub — not yet implemented"}
-
-async def _mock_handle_admin(state: ShopSenseState) -> dict:
-    # Must set pending_tool_description so await_confirmation has something to interrupt with.
-    return {
-        "pending_tool_description": "[handle_admin] stub — action pending confirmation",
-        "confirmation_context": "admin action",
-    }
-
-async def _mock_execute_tool(state: ShopSenseState) -> dict:
-    return {"final_response": "[execute_tool] stub — tool executed (mock)"}
+async def _mock_handle_admin(_state: ShopSenseState) -> dict:
+    return {"final_response": "Admin analytics are available at /api/analytics/. Chat-based admin queries coming soon."}
 
 
 # ── Routing functions (read state; return the node name to jump to) ───────────
@@ -95,7 +84,7 @@ def _route_intent(state: ShopSenseState) -> str:
         "explain":          "route_query",
         "compare":          "compare_products",
         "purchase_intent":  "handle_purchase_intent",
-        "checkout":         "await_confirmation",
+        "checkout":         "handle_checkout",
         "order_status":     "handle_order_status",
         "post_purchase":    "handle_post_purchase",
         "wishlist_action":  "handle_wishlist",
@@ -151,17 +140,22 @@ def _build_graph() -> StateGraph:
     builder.add_node("summarize_reviews",       summarize_reviews)
     builder.add_node("recommend_alternatives",  recommend_alternatives)
 
-    # ── Purchase intent + price intelligence nodes ────────────────────────────
+    # ── Purchase intent + checkout + price intelligence nodes ─────────────────
     builder.add_node("handle_purchase_intent", handle_purchase_intent)
+    builder.add_node("handle_checkout",        handle_checkout)
     builder.add_node("price_intelligence",     price_intelligence)
     builder.add_node("propose_tool_action",    propose_tool_action)   # sync node — fine in LangGraph
 
-    # ── Mock nodes ────────────────────────────────────────────────────────────
-    builder.add_node("handle_order_status",   _mock_handle_order_status)
-    builder.add_node("handle_post_purchase",  _mock_handle_post_purchase)
+    # ── Execute tool (real) ───────────────────────────────────────────────────
+    builder.add_node("execute_tool",          execute_tool)
+
+    # ── Real nodes (order status + post-purchase) ─────────────────────────────
+    builder.add_node("handle_order_status",   handle_order_status)
+    builder.add_node("handle_post_purchase",  handle_post_purchase)
+
+    # ── Remaining stubs (wishlist, admin) ─────────────────────────────────────
     builder.add_node("handle_wishlist",       _mock_handle_wishlist)
     builder.add_node("handle_admin",          _mock_handle_admin)
-    builder.add_node("execute_tool",          _mock_execute_tool)
 
     # ── Entry point ───────────────────────────────────────────────────────────
     builder.add_edge(START, "load_context")
@@ -175,7 +169,7 @@ def _build_graph() -> StateGraph:
             "route_query":            "route_query",
             "compare_products":       "compare_products",
             "handle_purchase_intent": "handle_purchase_intent",
-            "await_confirmation":     "await_confirmation",
+            "handle_checkout":        "handle_checkout",
             "handle_order_status":    "handle_order_status",
             "handle_post_purchase":   "handle_post_purchase",
             "handle_wishlist":        "handle_wishlist",
@@ -223,6 +217,13 @@ def _build_graph() -> StateGraph:
         },
     )
 
+    # handle_checkout: pending_tool set → await_confirmation; error → save_history
+    builder.add_conditional_edges(
+        "handle_checkout",
+        lambda s: "await_confirmation" if s.get("pending_tool") else "save_history",
+        {"await_confirmation": "await_confirmation", "save_history": "save_history"},
+    )
+
     # price_intelligence: surge shown → await_confirmation; normal price → propose_tool_action
     builder.add_conditional_edges(
         "price_intelligence",
@@ -238,10 +239,15 @@ def _build_graph() -> StateGraph:
     builder.add_edge("summarize_reviews",      "save_history")
 
     # ── Confirmation flow ─────────────────────────────────────────────────────
-    # handle_post_purchase and handle_admin set up a pending tool action, then
-    # await_confirmation pauses for the user's reply.
-    builder.add_edge("handle_post_purchase", "await_confirmation")
-    builder.add_edge("handle_admin",         "await_confirmation")
+    # handle_post_purchase: review with rating → await_confirmation;
+    # return / no-rating / fallback → save_history (final_response already set).
+    builder.add_conditional_edges(
+        "handle_post_purchase",
+        lambda s: "await_confirmation" if s.get("pending_tool") else "save_history",
+        {"await_confirmation": "await_confirmation", "save_history": "save_history"},
+    )
+    # handle_admin stub always sets final_response → save_history
+    builder.add_edge("handle_admin", "save_history")
 
     builder.add_conditional_edges(
         "await_confirmation",

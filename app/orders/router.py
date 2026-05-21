@@ -1,14 +1,20 @@
 import uuid
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.dependencies import get_current_user
+from app.auth.dependencies import get_current_user, require_admin
 from app.auth.models import User, UserRole
 from app.database import get_db
 from app.orders import service
-from app.orders.kafka_producer import publish_cart_updated, publish_order_created
+from app.orders.kafka_producer import (
+    publish_cart_updated,
+    publish_order_created,
+    publish_order_delivered,
+)
 from app.orders.schemas import AddToCartRequest, CartResponse, OrderResponse
 from app.redis_client import get_redis
 
@@ -56,7 +62,7 @@ async def get_cart(
 
 # ── Orders ────────────────────────────────────────────────────────────────────
 
-@router.post("/orders", response_model=OrderResponse, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=OrderResponse, status_code=status.HTTP_201_CREATED)
 async def create_order(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -75,7 +81,7 @@ async def create_order(
     return order
 
 
-@router.get("/orders/{order_id}", response_model=OrderResponse)
+@router.get("/{order_id}", response_model=OrderResponse)
 async def get_order(
     order_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
@@ -85,3 +91,39 @@ async def get_order(
     if order is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Order not found")
     return order
+
+
+class _UpdateStatusBody(BaseModel):
+    status: Literal["delivered"]
+
+
+@router.put("/{order_id}/status")
+async def update_order_status(
+    order_id: uuid.UUID,
+    body: _UpdateStatusBody,
+    _admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """
+    Admin-only. Simulates a courier webhook confirming delivery.
+    Marks the order delivered, records delivered_at, and publishes order.delivered
+    to Kafka so the post-purchase worker can schedule the review reminder.
+    Only 'delivered' is accepted — other status transitions are out of scope.
+    """
+    try:
+        order = await service.deliver_order(db, order_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Order not found")
+
+    product_ids = [str(i["product_id"]) for i in (order.items or [])]
+    await publish_order_delivered(
+        order_id=str(order.id),
+        user_id=str(order.user_id),
+        product_ids=product_ids,
+    )
+
+    return {
+        "order_id": str(order.id),
+        "status": order.status,
+        "delivered_at": order.delivered_at.isoformat() if order.delivered_at else None,
+    }

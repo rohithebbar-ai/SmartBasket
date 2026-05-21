@@ -72,6 +72,7 @@ class Settings(BaseSettings):
     kafka_topic_product_created: str = "product.created"
     kafka_topic_cart_updated: str = "cart.updated"
     kafka_topic_order_created: str = "order.created"
+    kafka_topic_order_delivered: str = "order.delivered"
     kafka_topic_price_updated: str = "price.updated"
 
     # ── LLM Provider ─────────────────────────────────────────────────────────

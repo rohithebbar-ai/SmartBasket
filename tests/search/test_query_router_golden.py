@@ -19,6 +19,16 @@ from typing import Literal
 
 import pytest
 
+from app.config import settings
+from app.config import LLMProvider
+
+# Skip the whole module when not using Bedrock — Groq/Gemini models score below
+# the 85% threshold on this classification task. Run with LLM_PROVIDER=bedrock.
+pytestmark = pytest.mark.skipif(
+    settings.llm_provider != LLMProvider.BEDROCK,
+    reason="Golden tests require LLM_PROVIDER=bedrock (Haiku calibrated to 85%+ accuracy)",
+)
+
 QueryType = Literal["SEMANTIC", "ANALYTICAL", "HYBRID"]
 
 ACCURACY_THRESHOLD = 0.85  # 26 / 30

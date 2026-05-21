@@ -96,10 +96,24 @@ async def load_context(state: ShopSenseState) -> dict:
         except Exception as exc:
             log.warning("DB context load failed for user_id %s: %s", user_id, exc)
 
+    # ── 3. Load pending review prompt from Redis ──────────────────────────────
+    pending_review_products: list[str] = []
+    if user_id:
+        try:
+            redis = get_redis_client()
+            raw_review = await redis.get(f"pending_review:{user_id}")
+            if raw_review:
+                parsed_review = json.loads(raw_review)
+                if isinstance(parsed_review, list):
+                    pending_review_products = parsed_review
+        except Exception as exc:
+            log.debug("Redis pending_review load failed for user %s: %s", user_id, exc)
+
     return {
         "messages": messages,
         "user_email": user_email,
         "user_preferences": user_preferences,
+        "pending_review_products": pending_review_products,
         # Clear per-turn output fields so stale values from a previous graph run
         # on the same thread_id don't leak into this turn. MemorySaver/RedisSaver
         # persists state across invocations — without this, a previous NL-to-SQL

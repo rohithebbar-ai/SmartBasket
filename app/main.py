@@ -13,6 +13,7 @@ from app.search.kafka_consumer import stop_consumer as stop_search_consumer
 from app.search.pricing_engine import start_pricing_engine, stop_pricing_engine
 from app.orders.kafka_producer import close_producer as close_orders_producer
 from app.products.kafka import close_producer as close_products_producer
+from app.mcp.client import mcp_client
 from app.redis_client import close_pool, ping
 
 
@@ -31,6 +32,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await close_pool()
     await close_products_producer()
     await close_orders_producer()
+    await mcp_client.close()
 
 
 def create_app() -> FastAPI:

@@ -293,14 +293,6 @@ Respond with JSON only — no markdown:
 ["Dell XPS 15", "HP Spectre x360"]"""
 
 
-# ── Price Insight ─────────────────────────────────────────────────────────────
-# v1 — 2026-05-20 — generation tier; ~300ms
-# Generates a 3-4 sentence message explaining a price elevation and asking the user
-# whether to wait or proceed. Called by present_price_insight when price exceeds
-# the recent average by more than the configured threshold.
-# Tone: informative and helpful, not alarmist. Always ends with the wait/proceed choice.
-
-
 # ── Recommend Alternatives ────────────────────────────────────────────────────
 # v1 — 2026-05-21 — generation tier; ~200ms
 # Fires when a product is out of stock. Surfaces in-stock alternatives from
@@ -346,6 +338,37 @@ Write a balanced 4–5 sentence summary that:
 Tone: objective and informative — no hype, no superlatives.
 Do not start any sentence with "Overall". Under 120 words.
 Reference only the data provided above."""
+
+
+# ── Price Insight ─────────────────────────────────────────────────────────────
+# v1 — 2026-05-20 — generation tier; ~300ms
+# Generates a 3-4 sentence message explaining a price elevation and asking the user
+# whether to wait or proceed. Called by price_intelligence when price exceeds
+# the recent average by more than the configured threshold.
+# Tone: informative and helpful, not alarmist. Always ends with the wait/proceed choice.
+
+# ── Post-Purchase Intent Classifier ──────────────────────────────────────────
+# v1 — 2026-05-21 — fast tier; ~100ms
+# Detects whether the user wants to submit a review or request a return/refund,
+# and extracts the rating + text when present.
+
+POST_PURCHASE_PROMPT = """Analyse this post-purchase message from a customer.
+
+Message: {message}
+
+Determine:
+1. action — exactly one of:
+   REVIEW  — user wants to rate or review a product they received
+   RETURN  — user wants to return, exchange, or get a refund
+   OTHER   — request is unclear or does not fit either category
+
+2. rating — integer 1 to 5 if the user mentions a score ("4 stars", "8/10" → 4,
+   "loved it" alone is not enough — null if no explicit number is given)
+
+3. review_text — their written opinion as a plain string; empty string if not provided
+
+Respond with JSON only — no markdown, no explanation:
+{{"action": "REVIEW", "rating": 4, "review_text": "Great battery but runs a bit hot"}}"""
 
 
 # ── Price Insight ─────────────────────────────────────────────────────────────

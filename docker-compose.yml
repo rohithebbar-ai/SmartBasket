@@ -77,7 +77,7 @@ services:
       retries: 10
       start_period: 20s
 
-  # Runs once after Kafka is healthy, creates all 5 topics, then exits.
+  # Runs once after Kafka is healthy, creates all 6 topics, then exits.
   kafka-init:
     image: confluentinc/cp-kafka:7.6.0
     depends_on:
@@ -85,11 +85,12 @@ services:
         condition: service_healthy
     entrypoint: ["/bin/bash", "-c"]
     command: |
-      "kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic product.viewed  --partitions 3 --replication-factor 1 &&
-       kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic product.created --partitions 3 --replication-factor 1 &&
-       kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic cart.updated    --partitions 3 --replication-factor 1 &&
-       kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic order.created   --partitions 3 --replication-factor 1 &&
-       kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic price.updated   --partitions 3 --replication-factor 1 &&
+      "kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic product.viewed   --partitions 3 --replication-factor 1 &&
+       kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic product.created  --partitions 3 --replication-factor 1 &&
+       kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic cart.updated     --partitions 3 --replication-factor 1 &&
+       kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic order.created    --partitions 3 --replication-factor 1 &&
+       kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic order.delivered  --partitions 3 --replication-factor 1 &&
+       kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic price.updated    --partitions 3 --replication-factor 1 &&
        echo 'All topics created.'"
     restart: "no"
 
@@ -109,6 +110,44 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
+
+  # ── Background worker processes ───────────────────────────────────────────────
+  # Both run in their own containers, separate from the FastAPI web process, so
+  # they never block HTTP request handling.
+
+  personalisation-worker:
+    build: .
+    command: python -m workers.run_workers
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    volumes:
+      - ".:/app"
+    restart: on-failure
+
+  post-purchase-worker:
+    build: .
+    command: >
+      python -c "
+      import asyncio;
+      from workers.post_purchase_worker import run_post_purchase_worker;
+      asyncio.run(run_post_purchase_worker())"
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    volumes:
+      - ".:/app"
+    restart: on-failure
 
 volumes:
   postgres_data:

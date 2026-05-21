@@ -53,9 +53,9 @@ data/raw/
 data/processed/
 *.csv
 *.parquet
+.claudeignore
 
 # Logs
 *.log
 logs/
 
-skills

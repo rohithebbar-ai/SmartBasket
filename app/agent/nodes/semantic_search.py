@@ -78,10 +78,26 @@ async def semantic_search(state: ShopSenseState) -> dict:
     # Step 4 — Qdrant search (sync)
     candidates = await asyncio.to_thread(search, vector, qdrant_filter, 20)
 
-    # Step 5 — Rerank top-20 → top-10 (sync cross-encoder, run in thread)
-    results = await asyncio.to_thread(rerank, filters.rewritten_query, candidates, 10)
+    # Step 5 — Rerank + over-budget search run concurrently (reranker takes ~200ms)
+    overrun_filter: Filter | None = None
+    if filters.max_price is not None:
+        overrun_filter = Filter(must=[
+            FieldCondition(
+                key="current_price",
+                range=Range(gt=filters.max_price, lte=filters.max_price * 1.30),
+            )
+        ])
+
+    reranked, overrun_candidates = await asyncio.gather(
+        asyncio.to_thread(rerank, filters.rewritten_query, candidates, 10),
+        asyncio.to_thread(search, vector, overrun_filter, 5) if overrun_filter else asyncio.sleep(0),
+    )
+    results = reranked
+    budget_overrun = overrun_candidates if isinstance(overrun_candidates, list) else []
 
     return {
         "search_results": [r.model_dump() for r in results],
         "sources": [r.product_id for r in results],
+        "extracted_filters": filters.model_dump(),
+        "budget_overrun_results": [r.model_dump() for r in budget_overrun],
     }

@@ -5,7 +5,7 @@ POST /api/search/
     1. Classify query as SEMANTIC | ANALYTICAL | HYBRID (Bedrock Haiku, ~150ms, Redis-cached).
     2. SEMANTIC   → embed → Qdrant top-20 → flashrank rerank → SearchResponse
     3. ANALYTICAL → run_nl_to_sql → AnalyticsResponse
-    4. HYBRID     → 501 Not Implemented (RRF hybrid search lands on Day 11)
+    4. HYBRID     → RRF hybrid: SQL constrains candidates, Qdrant ranks within the filtered set.
 
 Callers inspect `query_type` in the response to know which shape was returned.
 """
@@ -84,7 +84,7 @@ async def product_search(
     1. Classify query type (SEMANTIC | ANALYTICAL | HYBRID) via Bedrock Haiku.
     2. SEMANTIC:   embed → Qdrant → rerank → SearchResponse
     3. ANALYTICAL: NL-to-SQL → AnalyticsResponse (no insight synthesis — raw results)
-    4. HYBRID:     501 until Day 11 RRF hybrid search is built
+    4. HYBRID:     RRF hybrid search — SQL filters candidate set, Qdrant ranks within it
     """
     routing = await classify_query(body.query)
     log.info("Search routing: query_type=%s query='%.80s'", routing.type, body.query)

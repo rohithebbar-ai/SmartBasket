@@ -72,6 +72,26 @@ def _build_context_block(state: ShopSenseState, query_type: str) -> str:
     )
 
 
+def _build_budget_overrun_section(state: ShopSenseState) -> str:
+    overrun = (state.get("budget_overrun_results") or [])[:3]
+    if not overrun:
+        return ""
+    lines = ["=== Slightly above budget (worth considering) ==="]
+    filters = state.get("extracted_filters") or {}
+    max_price = filters.get("max_price")
+    for r in overrun:
+        price = r.get("current_price", 0)
+        premium = f"₹{price - max_price:,.0f} above budget" if max_price else ""
+        specs = r.get("specs") or {}
+        spec_note = ", ".join(f"{k}: {v}" for k, v in list(specs.items())[:2])
+        lines.append(
+            f"- {r.get('brand', '')} {r.get('name', '')}: ₹{price:,.0f}"
+            + (f" ({premium})" if premium else "")
+            + (f" | {spec_note}" if spec_note else "")
+        )
+    return "\n".join(lines)
+
+
 async def synthesise(state: ShopSenseState) -> dict:
     # If validation failed in nl_to_sql_search, final_response is already set
     if state.get("final_response"):
@@ -82,17 +102,26 @@ async def synthesise(state: ShopSenseState) -> dict:
     query_type = state.get("query_type", "SEMANTIC").upper()
     user_preferences = state.get("user_preferences") or {}
 
+    extracted = state.get("extracted_filters") or {}
+    use_case = extracted.get("use_case") or "none"
+    max_price = extracted.get("max_price")
+    budget_context = f"₹{max_price:,.0f}" if max_price else "not specified"
+
     context_block = _build_context_block(state, query_type)
+    budget_overrun_section = _build_budget_overrun_section(state)
 
     prompt = SYNTHESIS_PROMPT.format(
         question=question,
         query_type=query_type,
         context_block=context_block,
+        budget_overrun_section=budget_overrun_section,
+        use_case=use_case,
+        budget_context=budget_context,
         user_preferences=json.dumps(user_preferences) if user_preferences else "none",
     )
 
     try:
-        response = await call_llm(prompt, tier="generation", max_tokens=400, temperature=0.3)
+        response = await call_llm(prompt, tier="generation", max_tokens=450, temperature=0.3)
     except Exception as exc:
         log.error("Synthesis LLM call failed: %s", exc)
         response = _FALLBACK_RESPONSE

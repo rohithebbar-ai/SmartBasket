@@ -1,32 +1,21 @@
 """
-handle_purchase_intent — checkout entry flow (Day 13: steps 1-4 only).
+handle_purchase_intent — entry point for the purchase flow.
 
-Reads product context from state["sources"][0], which is set by the search node
-that ran in the same or previous turn. The user typically says "I'll take it" or
-"buy the first one" after seeing search results, so sources contains the product_id.
+Reads state["sources"][0], which is populated by whichever search node ran in
+the same or a prior turn. Fetches fresh price and stock from PostgreSQL, checks
+availability, computes a delivery estimate, and builds the add_to_cart payload.
 
-Steps implemented today:
-  1. Identify product — read sources[0], fetch fresh price + stock from PostgreSQL.
-  2. check_stock_status — if stock_count == 0, surface an out-of-stock message.
-  3. get_delivery_estimate — hardcoded by stock level (MCP tool on Day 14).
-  4. Build add_to_cart payload and route to check_price_trend → present_price_insight
-     → propose_tool_action → await_confirmation.
-
-Steps deferred to Day 14 (MCP):
-  5. get_frequently_bought_together cross-sell after add_to_cart.
-  6. Payment flow (process_payment tool).
-
-Reads:  state.sources (product_id from previous search)
+Reads:  state.sources (product_id from the most recent search result)
 Writes: state.pending_tool ("add_to_cart")
         state.pending_tool_args (product_id, product_name, current_price,
                                  quantity, delivery_estimate)
-        state.pending_tool_description (human-readable for propose_tool_action)
+        state.pending_tool_description (human-readable summary for confirmation)
         state.cart_summary (stock_count, stock_available, delivery_days)
-        state.final_response  ← error path only
+        state.final_response  ← error path only (product not found or out of stock)
 
 Outgoing edges:
-  → check_price_trend (normal — pending_tool set)
-  → save_history     (error — product not found or out of stock)
+  → check_price_trend  (normal — pending_tool is set)
+  → save_history       (error — product not found or out of stock)
 """
 
 import logging
@@ -86,11 +75,15 @@ async def handle_purchase_intent(state: ShopSenseState) -> dict:
     current_price = float(db_row["current_price"])
     display_name = f"{db_row['brand']} {db_row['name']}"
 
-    # Step 2 — check_stock_status
+    # Step 2 — check_stock_status; set recommend_alternatives_query so the graph
+    # routes to recommend_alternatives instead of dropping straight to save_history
     if stock_count == 0:
-        return {"final_response": _OUT_OF_STOCK_MSG}
+        return {
+            "final_response": _OUT_OF_STOCK_MSG,
+            "recommend_alternatives_query": display_name,
+        }
 
-    # Step 3 — get_delivery_estimate (hardcoded until Day 14 MCP)
+    # Step 3 — estimate delivery window based on stock level
     delivery_str, delivery_days = _delivery_estimate(stock_count)
 
     # Step 4 — Build add_to_cart payload
@@ -114,6 +107,5 @@ async def handle_purchase_intent(state: ShopSenseState) -> dict:
             "stock_available": True,
             "delivery_days": delivery_days,
         },
-        # TODO Day 14: get_frequently_bought_together cross-sell
-        # TODO Day 14: payment flow via process_payment tool
+        # Cross-sell and payment flow are handled by downstream MCP tools.
     }

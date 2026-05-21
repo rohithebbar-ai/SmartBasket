@@ -20,7 +20,7 @@ Flow (two-pass per confirmation):
     - AMBIGUOUS → set final_response to the re-ask prompt, then interrupt()
                   again — the user must answer clearly before we proceed
 
-Security rule (from CLAUDE.md / Section 19):
+Security rule:
   AMBIGUOUS must NEVER be treated as CONFIRM. The node always re-asks.
   Only a clear affirmative in the latest user message counts as CONFIRM.
 

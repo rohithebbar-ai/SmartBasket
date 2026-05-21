@@ -76,6 +76,9 @@ def create_app() -> FastAPI:
     from app.agent.router import router as agent_router
     app.include_router(agent_router, prefix="/api/chat", tags=["agent"])
 
+    from app.mcp.server import router as mcp_router
+    app.include_router(mcp_router, prefix="/mcp", tags=["mcp"])
+
     # ── System endpoints ──────────────────────────────────────────────────────
 
     @app.get("/health", tags=["meta"])

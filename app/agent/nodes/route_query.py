@@ -25,6 +25,21 @@ log = logging.getLogger(__name__)
 
 _DEFAULT_QUERY_TYPE = "SEMANTIC"
 
+# Keywords that signal the user wants a review summary rather than product search.
+# Checked before the LLM router so no extra API call is needed for clear cases.
+_REVIEW_KEYWORDS = {
+    "review", "reviews", "what do people think", "what do customers",
+    "what do users", "customer opinion", "customer feedback", "user feedback",
+    "pros and cons", "complaints about", "is it worth", "worth buying",
+    "is it good", "would you recommend", "what are people saying",
+    "how good is", "thoughts on", "honest opinion",
+}
+
+
+def _is_review_query(message: str) -> bool:
+    msg = message.lower()
+    return any(kw in msg for kw in _REVIEW_KEYWORDS)
+
 
 async def route_query(state: ShopSenseState) -> dict:
     messages: list[dict[str, str]] = state.get("messages", [])
@@ -33,6 +48,12 @@ async def route_query(state: ShopSenseState) -> dict:
         return {"query_type": _DEFAULT_QUERY_TYPE}
 
     current_message = messages[-1].get("content", "")
+
+    # Review-summary queries are intercepted before the LLM router —
+    # keyword matching is fast and accurate enough for this specific pattern.
+    if _is_review_query(current_message):
+        log.info("Route query: review summary detected — skipping LLM router")
+        return {"query_type": "REVIEW_SUMMARY"}
 
     # Build a short history string from the prior 4 messages (2 turns).
     prior = messages[:-1][-4:]

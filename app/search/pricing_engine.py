@@ -4,7 +4,7 @@ Pricing engine — background task that runs every PRICING_ENGINE_INTERVAL_SECON
 Each cycle:
   1. Load all active products from PostgreSQL.
   2. Read views:{product_id} counters from Redis in one MGET round-trip.
-  3. Compute category average views to normalise demand (Section 21.1 Phase A).
+  3. Compute category average views to normalise demand.
   4. Apply pricing rules — demand-score model with supply-constraint override.
   5. Clamp new price to [0.80, 1.30] × base_price.
   6. Write updated current_price to PostgreSQL + Redis cache (via products service).
@@ -18,9 +18,9 @@ Pricing rule hierarchy (in priority order):
      < 1.0 → below-average demand → price down (clearance)
   3. Near-average demand (±10%) → no change (avoid constant micro-updates)
 
-The demand-score model supersedes the hard threshold rules from Section 11.2.
-Section 21.1 Phase B (elasticity coefficients from price_history) can replace
-ELASTICITY_COEF once 10+ pricing cycles have accumulated per product.
+The demand-score model is the primary pricing mechanism. ELASTICITY_COEF can be
+replaced with per-product elasticity coefficients derived from price_history once
+sufficient pricing cycles have accumulated.
 
 Runs as a background asyncio task started in app/main.py alongside Kafka consumers.
 Never imported by the web server hot path — no circular import risk.

@@ -79,8 +79,8 @@ async def update_price(
 ) -> ProductResponse:
     """
     Updates current_price in PostgreSQL and the Redis cache.
-    Called by the pricing engine (Day 15). Protected by require_admin until
-    a dedicated internal service token is introduced.
+    Protected by require_admin; a dedicated internal service token can replace
+    this gate if the pricing engine is extracted to a separate service.
     """
     reason = PriceChangeReason(data.reason) if data.reason else None
     product = await service.update_product_price(db, product_id, data.new_price, reason)

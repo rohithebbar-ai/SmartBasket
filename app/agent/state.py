@@ -9,7 +9,7 @@ Design notes:
   - total=False makes every field optional — nodes only write the fields they own;
     unset fields stay absent rather than holding None sentinels.
   - price_trend_pct, price_insight_shown, price_alert_set, user_decision are
-    Section 22.4 price-intelligence fields — populated by check_price_trend and
+    Price-intelligence fields — populated by check_price_trend and
     consumed by present_price_insight / the WAIT branch.
 """
 
@@ -53,7 +53,7 @@ class ShopSenseState(TypedDict, total=False):
     final_response: str
     sources: list[str]     # product_id strings or table names cited in the response
 
-    # ── Tool calling — checkout flow (Section 19 / Day 14) ───────────────────
+    # ── Tool calling — checkout flow ──────────────────────────────────────────
     pending_tool: str                  # Name of the write tool awaiting user confirmation
     pending_tool_args: dict[str, Any]  # Arguments that will be passed to the tool
     pending_tool_description: str      # Human-readable description shown before confirmation
@@ -65,12 +65,25 @@ class ShopSenseState(TypedDict, total=False):
     order_id: str                      # Set after successful process_payment call
     cart_summary: dict[str, Any]       # Current cart state; passed as context to synthesise
 
-    # ── Price intelligence — proactive insight (Section 22.4) ────────────────
-    # Populated by check_price_trend node after PURCHASE_INTENT is detected.
-    # present_price_insight uses these to decide whether to surface an alert.
-    price_trend_pct: float             # % above/below 7-day average (negative = below)
+    # ── Price intelligence — proactive insight ────────────────────────────────
+    # Populated by price_intelligence node after PURCHASE_INTENT is detected.
+    price_trend_pct: float             # % above/below recent price average (negative = below)
     price_insight_shown: bool          # True once the price insight has been surfaced
     price_alert_set: bool              # True if user asked to be alerted on price drop
+
+    # ── Out-of-stock fallback ─────────────────────────────────────────────────
+    # Set by handle_purchase_intent when a product is OOS. The recommend_alternatives
+    # node reads this to find similar in-stock products.
+    recommend_alternatives_query: str  # Display name of the OOS product
+
+    # ── Search context for synthesis ──────────────────────────────────────────
+    # extracted_filters: FilterExtractionOutput fields; gives synthesise access to
+    #   max_price and use_case so it can mention budget and add domain-specific tips.
+    # budget_overrun_results: products just above max_price (up to 30% over);
+    #   synthesise surfaces these with an exact ₹ premium and asks if the user
+    #   would consider stretching — the same proactive behaviour as Amazon Rufus.
+    extracted_filters: dict[str, Any]
+    budget_overrun_results: list[dict[str, Any]]
 
     # ── Human-in-the-loop decision ────────────────────────────────────────────
     # Written by await_confirmation after classifying the user's reply.

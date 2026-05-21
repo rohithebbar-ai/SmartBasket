@@ -115,8 +115,9 @@ class Settings(BaseSettings):
     nvidia_model: str = "nvidia/nv-embedqa-e5-v5"
 
     # ── MCP Server ────────────────────────────────────────────────────────────
-    mcp_server_port: int = Field(default=8006, gt=0, lt=65536)
-    mcp_server_url: str = "http://localhost:8006"
+    # MCP tools are mounted inside the main FastAPI app at /mcp — no separate
+    # process or port. mcp_server_url points to the main app's /mcp prefix.
+    mcp_server_url: str = "http://localhost:8000/mcp"
 
     # ── External Services ─────────────────────────────────────────────────────
     sendgrid_api_key: str | None = None

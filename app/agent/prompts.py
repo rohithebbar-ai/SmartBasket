@@ -80,6 +80,7 @@ PURCHASE_INTENT — user wants to buy a specific product or add it to cart
 CHECKOUT — user wants to review cart, confirm order, or complete payment
   "proceed to checkout"
   "show me my cart and place the order"
+  "yes" / "sure" / "ok" when the assistant's last message mentioned checkout or payment
 
 ORDER_STATUS — user wants to track an existing order or delivery
   "where is my order #12345"
@@ -101,10 +102,12 @@ OUT_OF_SCOPE — message is not related to shopping, products, or orders
   "what is the weather in Bangalore today"
   "tell me a joke"
 
-Rules:
-- Use conversation history only to understand references ("that one", "it", "the second option").
-- PURCHASE_INTENT is for specific product selection. CHECKOUT is for completing a transaction.
+Critical disambiguation rules:
+- If the LAST assistant message in history contained "Ready to checkout?" or "checkout" or "place the order" or "confirm payment", and the current message is "yes"/"sure"/"ok"/"proceed"/"checkout" — classify as CHECKOUT, NOT PURCHASE_INTENT.
+- PURCHASE_INTENT is for buying a specific OR referenced product. This INCLUDES vague references to search results: "I want to buy the first one", "add the cheapest one to cart", "get me the second option", "I'll take that one", "buy this for me". If products were shown in history and the user says "buy X" or "add X" where X references those results, use PURCHASE_INTENT.
+- CHECKOUT is for completing a transaction (user has already added items to cart).
 - If the message mentions an order number or delivery tracking, use ORDER_STATUS.
+- Use conversation history only to understand references ("that one", "it", "the second option").
 - When genuinely ambiguous, prefer PRODUCT_SEARCH over OUT_OF_SCOPE.
 
 Respond with JSON only — no markdown, no explanation outside the JSON:
@@ -169,14 +172,26 @@ Classify the user's reply:
   Phrases that count: "no", "cancel", "don't", "stop", "nevermind", "forget it",
   "don't do it", "abort", "nope", "not now".
 
-- AMBIGUOUS — anything that is not a clear yes or no. This includes:
-  questions ("how much will it cost?"), conditions ("only if it ships today"),
-  partial agreement ("maybe, but…"), silence, or unrelated messages.
+- DECLINE  — also use when the user is requesting a DIFFERENT product or action than
+  what's proposed. If the action is "add Toshiba Satellite to cart" and the user says
+  "add the Lenovo Yoga instead" or "I want the Lenovo one", that is DECLINE (they are
+  cancelling the proposed action, not confirming it).
+
+- DECLINE  — also use when the user sends a NEW shopping query instead of answering.
+  If the user says "show me Dell laptops", "find me something cheaper", "what about HP?",
+  "search for gaming laptops", or any phrase that is clearly a new product search rather
+  than a yes/no response, that is DECLINE (they want to start over, not confirm).
+
+- AMBIGUOUS — anything that is not a clear yes or no AND is not a new/different request.
+  This includes: questions ("how much will it cost?"), conditions ("only if it ships today"),
+  partial agreement ("maybe, but…"), or vague replies ("I guess", "hmm").
 
 Rules:
 - Only a clear, direct affirmative in the user's reply counts as CONFIRM.
 - "I think so" or "probably yes" is AMBIGUOUS — not CONFIRM.
 - A question about the action is always AMBIGUOUS — the user wants more info first.
+- If the user names a DIFFERENT product than what's in the action, classify as DECLINE.
+- If the user sends a new shopping query (search request, product question), classify as DECLINE.
 - Err toward AMBIGUOUS when unsure. Never guess CONFIRM.
 
 Respond with JSON only — no markdown, no explanation outside the JSON:
@@ -206,9 +221,14 @@ Rules:
 - Price constraints like "under 80k" → max_price: 80000
 - If no filter applies, set the field to null (not missing)
 - Keep brand names exactly as they appear in the market
+- use_case MUST be null unless the user EXPLICITLY mentions a use case (e.g., "for gaming", "for video editing").
+  DO NOT infer use_case from product types in results. If user just says "laptop", use_case is null.
 
-Respond with JSON only — no markdown, no explanation:
-{{"rewritten_query": "gaming laptop with dedicated graphics card", "max_price": 80000, "min_price": null, "brand": null, "category": "laptop", "use_case": "gaming", "features": ["dedicated GPU"]}}"""
+Example — user says "show laptops under 80K":
+{{"rewritten_query": "laptop computer under budget", "max_price": 80000, "min_price": null, "brand": null, "category": "laptop", "use_case": null, "features": []}}
+
+Example — user says "gaming laptop under 80K":
+{{"rewritten_query": "gaming laptop dedicated GPU", "max_price": 80000, "min_price": null, "brand": null, "category": "laptop", "use_case": "gaming", "features": ["dedicated GPU"]}}"""
 
 
 # ── Response Synthesis ────────────────────────────────────────────────────────
@@ -241,9 +261,10 @@ SEMANTIC / HYBRID (4+ products):
 SEMANTIC / HYBRID (1–3 products):
   Recommend directly. Explain why each fits the user's need (specs + use case fit).
 
-USE-CASE TIPS — when use_case is not "none":
-  After the product list, add a short "Key considerations for {use_case}" section
-  with 2–3 practical bullets. Be specific:
+USE-CASE TIPS — ONLY when use_case is explicitly set (not "none" or null):
+  Add a short "Key considerations for {use_case}" section ONLY if the user asked
+  specifically for that use case. Do NOT add gaming tips for a generic laptop search.
+  When relevant:
     AI/ML → VRAM, CUDA support, RAM ≥ 16 GB
     Gaming → GPU tier, refresh rate, thermal headroom
     Video editing → CPU core count, colour accuracy, storage speed

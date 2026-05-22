@@ -31,8 +31,9 @@ log = logging.getLogger(__name__)
 router = APIRouter()
 
 _GST_RATE = Decimal("0.18")
-_FREE_DELIVERY_THRESHOLD = Decimal("50000")
-_DELIVERY_FEE = Decimal("99")
+_FREE_DELIVERY_THRESHOLD = Decimal("50000")  # ₹50,000
+_DELIVERY_FEE = Decimal("499")               # ₹499
+_USD_TO_INR = Decimal("83")
 
 
 # ── Request models ────────────────────────────────────────────────────────────
@@ -93,15 +94,15 @@ async def _calculate_total_internal(user_id: str, coupon_code: str | None = None
     if not cart.items:
         raise ValueError("cart_empty")
 
-    subtotal = sum(Decimal(str(i.unit_price)) * i.qty for i in cart.items)
+    # unit_price in Redis is in USD — convert to INR for all display and business logic
+    subtotal = sum(Decimal(str(i.unit_price)) * i.qty * _USD_TO_INR for i in cart.items)
 
-    # Free delivery for orders over ₹50,000; ₹99 otherwise
+    # Free delivery for orders over ₹50,000; ₹499 otherwise
     delivery_fee = Decimal("0") if subtotal >= _FREE_DELIVERY_THRESHOLD else _DELIVERY_FEE
     gst = (subtotal * _GST_RATE).quantize(Decimal("0.01"))
 
     discount = Decimal("0")
     if coupon_code:
-        # Coupon lookup — stub (extend when coupons table is added)
         log.info("Coupon lookup for code '%s' — not yet implemented", coupon_code)
 
     total = subtotal + gst + delivery_fee - discount
@@ -110,8 +111,8 @@ async def _calculate_total_internal(user_id: str, coupon_code: str | None = None
         {
             "name": item.name,
             "qty": item.qty,
-            "unit_price": float(item.unit_price),
-            "subtotal": float(Decimal(str(item.unit_price)) * item.qty),
+            "unit_price": float(Decimal(str(item.unit_price)) * _USD_TO_INR),
+            "subtotal": float(Decimal(str(item.unit_price)) * item.qty * _USD_TO_INR),
         }
         for item in cart.items
     ]

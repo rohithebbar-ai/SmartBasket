@@ -26,6 +26,8 @@ Outgoing edge: → await_confirmation
 
 from app.agent.state import ShopSenseState
 
+_USD_TO_INR = 83
+
 
 def propose_tool_action(state: ShopSenseState) -> dict:
     tool = state.get("pending_tool", "")
@@ -33,9 +35,9 @@ def propose_tool_action(state: ShopSenseState) -> dict:
 
     if tool == "add_to_cart":
         product_name = args.get("product_name", "this product")
-        price = args.get("current_price", 0)
+        price_inr = round(float(args.get("current_price", 0)) * _USD_TO_INR)
         msg = (
-            f"I'll add {product_name} (₹{price:,.0f}) to your cart. Shall I proceed?"
+            f"I'll add {product_name} (₹{price_inr:,.0f}) to your cart. Shall I proceed?"
         )
 
     elif tool == "process_payment":

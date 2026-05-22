@@ -50,6 +50,10 @@ class SearchRequest(BaseModel):
     top_k: int = Field(default=10, ge=1, le=50, description="Number of results to return after reranking")
 
 
+# DB and Qdrant store prices in USD; callers send INR values.
+_INR_TO_USD = 83.0
+
+
 # ── Filter builder ────────────────────────────────────────────────────────────
 
 def _build_qdrant_filter(f: SearchFilters) -> Filter | None:
@@ -64,7 +68,10 @@ def _build_qdrant_filter(f: SearchFilters) -> Filter | None:
     if f.min_price is not None or f.max_price is not None:
         conditions.append(FieldCondition(
             key="current_price",
-            range=Range(gte=f.min_price, lte=f.max_price),
+            range=Range(
+                gte=f.min_price / _INR_TO_USD if f.min_price is not None else None,
+                lte=f.max_price / _INR_TO_USD if f.max_price is not None else None,
+            ),
         ))
 
     if f.in_stock_only:

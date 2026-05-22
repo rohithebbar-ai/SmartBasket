@@ -71,6 +71,8 @@ Rules:
   then GROUP BY p.id, p.name, p.brand, p.category, p.current_price,
   p.avg_rating, p.stock_count.
 - Return SQL only — no markdown, no code fences, no explanation.
+- CURRENCY: prices are stored in USD. When user says ₹80,000 use current_price < 964.
+  Divide INR by 83 to get USD. Example: ₹50,000 → current_price < 602.
 
 Query: {query}"""
 

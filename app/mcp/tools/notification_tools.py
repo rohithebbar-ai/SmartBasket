@@ -1,7 +1,10 @@
 """
 Notification tools — email and alert tools for the post-purchase flow.
 
-  POST /send_confirmation_email  — SendGrid receipt after successful payment.
+  POST /send_confirmation_email  — receipt after successful payment.
+                                   Tries SendGrid first; falls back to Gmail SMTP
+                                   if sendgrid_api_key is not set but gmail_user +
+                                   gmail_app_password are configured.
                                    Auto-executes after process_payment; no separate
                                    await_confirmation gate for this tool.
   POST /set_price_alert          — saves a price_alerts row; write tool with gate.
@@ -9,6 +12,9 @@ Notification tools — email and alert tools for the post-purchase flow.
 """
 
 import logging
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 
 from fastapi import APIRouter
 from pydantic import BaseModel
@@ -59,10 +65,6 @@ async def send_confirmation_email(body: ConfirmationEmailBody) -> dict:
     Sends an HTML receipt via SendGrid.
     Never raises — a committed order must never be invalidated by an email failure.
     """
-    if not settings.sendgrid_api_key:
-        log.warning("SendGrid key not configured — skipping confirmation email")
-        return {"sent": False, "to": body.user_email, "reason": "sendgrid_not_configured"}
-
     async with AsyncSessionLocal() as db:
         order_row = (
             await db.execute(_ORDER_SQL, {"order_id": body.order_id})
@@ -82,8 +84,9 @@ async def send_confirmation_email(body: ConfirmationEmailBody) -> dict:
         for item in items
     )
 
+    subject = f"Order confirmed — #{short_id}"
     html_body = f"""
-    <h2>Your ShopSense order is confirmed! 🎉</h2>
+    <h2>Your ShopSense order is confirmed!</h2>
     <p>Order ID: <strong>#{short_id}</strong></p>
     <h3>Items ordered:</h3>
     <ul>{items_html}</ul>
@@ -96,20 +99,40 @@ async def send_confirmation_email(body: ConfirmationEmailBody) -> dict:
     </p>
     """
 
-    message = Mail(
-        from_email=settings.sendgrid_from_email,
-        to_emails=body.user_email,
-        subject=f"Order confirmed — #{short_id}",
-        html_content=html_body,
-    )
+    # ── Try SendGrid first ────────────────────────────────────────────────────
+    if settings.sendgrid_api_key:
+        message = Mail(
+            from_email=settings.sendgrid_from_email,
+            to_emails=body.user_email,
+            subject=subject,
+            html_content=html_body,
+        )
+        try:
+            SendGridAPIClient(settings.sendgrid_api_key).send(message)
+            log.info("Confirmation email sent via SendGrid: order=%s to=%s", short_id, body.user_email)
+            return {"sent": True, "to": body.user_email, "via": "sendgrid"}
+        except Exception as exc:
+            log.error("SendGrid failed for order %s: %s — trying Gmail SMTP", short_id, exc)
 
-    try:
-        SendGridAPIClient(settings.sendgrid_api_key).send(message)
-        log.info("Confirmation email sent: order=%s to=%s", short_id, body.user_email)
-        return {"sent": True, "to": body.user_email}
-    except Exception as exc:
-        log.error("SendGrid failed for order %s: %s", short_id, exc)
-        return {"sent": False, "to": body.user_email, "reason": str(exc)}
+    # ── Gmail SMTP fallback ───────────────────────────────────────────────────
+    if settings.gmail_user and settings.gmail_app_password:
+        try:
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = subject
+            msg["From"] = settings.gmail_user
+            msg["To"] = body.user_email
+            msg.attach(MIMEText(html_body, "html"))
+            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+                server.login(settings.gmail_user, settings.gmail_app_password)
+                server.sendmail(settings.gmail_user, body.user_email, msg.as_string())
+            log.info("Confirmation email sent via Gmail SMTP: order=%s to=%s", short_id, body.user_email)
+            return {"sent": True, "to": body.user_email, "via": "gmail_smtp"}
+        except Exception as exc:
+            log.error("Gmail SMTP failed for order %s: %s", short_id, exc)
+            return {"sent": False, "to": body.user_email, "reason": str(exc)}
+
+    log.warning("No email provider configured — skipping confirmation email for order %s", short_id)
+    return {"sent": False, "to": body.user_email, "reason": "no_email_provider_configured"}
 
 
 # ── set_price_alert ───────────────────────────────────────────────────────────

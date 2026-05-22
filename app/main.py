@@ -50,9 +50,13 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    allowed_origins = ["http://localhost:5173"]
+    if settings.frontend_url:
+        allowed_origins.append(settings.frontend_url)
+
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:5173"],  # Vite dev server
+        allow_origins=allowed_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

@@ -25,6 +25,7 @@ log = logging.getLogger(__name__)
 router = APIRouter()
 
 _DELIVERY_THRESHOLD = 10  # stock_count above which we promise 3-5 days
+_USD_TO_INR = 83
 
 
 # ── Request / response models ─────────────────────────────────────────────────
@@ -109,7 +110,7 @@ async def add_to_cart(body: AddToCartBody) -> dict:
     return {
         "success": True,
         "item_added": item_added,
-        "cart_total": float(cart.total),
+        "cart_total": round(float(cart.total) * _USD_TO_INR),  # INR
     }
 
 

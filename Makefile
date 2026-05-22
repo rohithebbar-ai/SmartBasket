@@ -17,7 +17,7 @@ logs:
 	docker compose logs -f
 
 workers:
-	uv run python workers/run_workers.py
+	uv run python -m workers.run_workers
 
 # ── Testing ───────────────────────────────────────────────────────────────────
 

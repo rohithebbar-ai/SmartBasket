@@ -15,6 +15,9 @@ from app.products.schemas import (
 )
 from app.redis_client import get_redis_client
 
+# DB stores prices in USD; frontend filter values arrive in INR.
+_INR_TO_USD = Decimal("83")
+
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
@@ -26,9 +29,9 @@ def _build_conditions(filters: ProductFilters) -> list:
     if filters.category:
         conds.append(Product.category == filters.category)
     if filters.min_price is not None:
-        conds.append(Product.current_price >= filters.min_price)
+        conds.append(Product.current_price >= filters.min_price / _INR_TO_USD)
     if filters.max_price is not None:
-        conds.append(Product.current_price <= filters.max_price)
+        conds.append(Product.current_price <= filters.max_price / _INR_TO_USD)
     if filters.min_rating is not None:
         conds.append(Product.avg_rating >= filters.min_rating)
     if filters.in_stock is True:
@@ -163,6 +166,42 @@ async def update_product_price(
         pass  # Cache miss is acceptable — DB is the source of truth
 
     return product
+
+
+async def get_frequently_bought_together(
+    db: AsyncSession, product_id: uuid.UUID, limit: int = 3
+) -> list[dict]:
+    """
+    Returns products co-purchased with product_id, ranked by co-occurrence frequency.
+    Scans orders.items JSONB to find all orders containing this product, then counts
+    how often each other product appears alongside it.
+    """
+    from sqlalchemy import text as sa_text
+    sql = sa_text("""
+        SELECT
+            p.id,
+            p.name,
+            p.brand,
+            CAST(p.current_price AS FLOAT) AS current_price,
+            p.avg_rating,
+            COUNT(*) AS co_count
+        FROM orders o
+        JOIN LATERAL jsonb_array_elements(o.items) AS item ON true
+        JOIN products p ON p.id = (item->>'product_id')::uuid
+        WHERE o.id IN (
+            SELECT o2.id
+            FROM orders o2
+            JOIN LATERAL jsonb_array_elements(o2.items) AS item2 ON true
+            WHERE (item2->>'product_id')::uuid = :product_id
+        )
+        AND (item->>'product_id')::uuid != :product_id
+        AND p.is_active = true
+        GROUP BY p.id, p.name, p.brand, p.current_price, p.avg_rating
+        ORDER BY co_count DESC
+        LIMIT :limit
+    """)
+    rows = (await db.execute(sql, {"product_id": product_id, "limit": limit})).mappings().all()
+    return [dict(r) for r in rows]
 
 
 async def get_product_reviews(

@@ -93,3 +93,11 @@ class ShopSenseState(TypedDict, total=False):
     # Set by load_context when 'pending_review:{user_id}' exists in Redis.
     # synthesise prepends a gentle review nudge then deletes the Redis key.
     pending_review_products: list[str]  # product_id strings awaiting review
+
+    # ── Frontend cart sync ────────────────────────────────────────────────────
+    # Set by execute_tool after a successful add_to_cart (guest and auth paths).
+    # SSE router reads this and includes it in the "done" event so the frontend
+    # can add the item to localStorage without a separate API call.
+    cart_action: dict[str, Any]  # {id, name, brand, current_price, quantity}
+    cart_cleared: bool           # True after successful payment — signals frontend to clear localStorage cart
+    cross_sell_products: list[dict[str, Any]]  # [{product_id, name, current_price, avg_rating}] shown as UI cards

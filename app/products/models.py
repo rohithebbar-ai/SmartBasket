@@ -41,6 +41,18 @@ class Product(Base):
 
     # lazy="noload" — never fetched implicitly. Service layer uses selectinload()
     # explicitly when reviews are needed, keeping list queries fast.
+    # Aspect sentiment scores — NULL until run_sentiment.py (data/ingestion) populates them.
+    battery_sentiment:       Mapped[float | None] = mapped_column(Float)
+    display_sentiment:       Mapped[float | None] = mapped_column(Float)
+    build_quality_sentiment: Mapped[float | None] = mapped_column(Float)
+    value_sentiment:         Mapped[float | None] = mapped_column(Float)
+    performance_sentiment:   Mapped[float | None] = mapped_column(Float)
+    keyboard_sentiment:      Mapped[float | None] = mapped_column(Float)
+    thermal_sentiment:       Mapped[float | None] = mapped_column(Float)
+    top_complaint:           Mapped[str | None]   = mapped_column(Text)
+    top_praise:              Mapped[str | None]   = mapped_column(Text)
+    sentiment_scored_at:     Mapped[datetime | None] = mapped_column()
+
     reviews: Mapped[list["Review"]] = relationship(
         "Review",
         back_populates="product",
@@ -93,9 +105,15 @@ class PriceHistory(Base):
     new_price: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     change_percentage: Mapped[float] = mapped_column(Float, nullable=False)
     # native_enum=False → stored as VARCHAR, matching the migration's CHECK constraint.
-    # Using native PostgreSQL ENUM would require a matching CREATE TYPE in the migration.
+    # values_callable forces SQLAlchemy to store .value (lowercase) not .name (uppercase).
+    # Python 3.11 changed str(StrEnum) behaviour; without this it inserts the .name.
     reason: Mapped[PriceChangeReason] = mapped_column(
-        SAEnum(PriceChangeReason, name="price_change_reason", native_enum=False),
+        SAEnum(
+            PriceChangeReason,
+            name="price_change_reason",
+            native_enum=False,
+            values_callable=lambda x: [e.value for e in x],
+        ),
         nullable=False,
     )
     changed_at: Mapped[datetime] = mapped_column(server_default=func.now())

@@ -32,11 +32,50 @@ from app.search.reranker import rerank
 log = logging.getLogger(__name__)
 
 
+def _merge_filters(new: FilterExtractionOutput, prev: dict) -> FilterExtractionOutput:
+    """Carry forward constraints from the previous turn when the current message is a refinement.
+
+    Rule: if the user explicitly changed brand, treat as a fresh search (don't carry anything).
+    Otherwise, fill in null fields from prev and prepend brand/category to rewritten_query
+    so the embedding also benefits from the carried context.
+    """
+    if not prev:
+        return new
+    # Brand changed explicitly → fresh search, carry nothing
+    if new.brand and prev.get("brand") and new.brand.lower() != prev["brand"].lower():
+        return new
+
+    updates: dict = {}
+    query_prefix: list[str] = []
+
+    if not new.brand and prev.get("brand"):
+        updates["brand"] = prev["brand"]
+        query_prefix.append(prev["brand"])
+    if new.max_price is None and prev.get("max_price"):
+        updates["max_price"] = prev["max_price"]
+    if new.min_price is None and prev.get("min_price"):
+        updates["min_price"] = prev["min_price"]
+    if not new.category and prev.get("category"):
+        updates["category"] = prev["category"]
+        query_prefix.append(prev["category"])
+
+    if not updates:
+        return new
+
+    # Enrich rewritten_query with carried-forward brand/category so the embedding
+    # reflects the full search intent, not just the refinement phrase.
+    if query_prefix:
+        updates["rewritten_query"] = f"{' '.join(query_prefix)} {new.rewritten_query}"
+
+    return new.model_copy(update=updates)
+
+
 async def semantic_search(state: ShopSenseState) -> dict:
     messages = state.get("messages", [])
     query = messages[-1]["content"] if messages else ""
+    prev_filters = state.get("extracted_filters") or {}
 
-    # Step 1 — Filter extraction
+    # Step 1 — Filter extraction from current message only; carry-forward via _merge_filters
     try:
         raw = await call_llm(
             FILTER_EXTRACTION_PROMPT.format(query=query),
@@ -45,6 +84,7 @@ async def semantic_search(state: ShopSenseState) -> dict:
             temperature=0.0,
         )
         filters = FilterExtractionOutput.model_validate_json(raw)
+        filters = _merge_filters(filters, prev_filters)
     except Exception as exc:
         log.warning("Filter extraction failed (%s) — using raw query with no filters", exc)
         filters = FilterExtractionOutput(rewritten_query=query)
@@ -53,6 +93,9 @@ async def semantic_search(state: ShopSenseState) -> dict:
     vector: list[float] = await asyncio.to_thread(embed, filters.rewritten_query)
 
     # Step 3 — Build Qdrant filter from non-null filter fields
+    # IMPORTANT: The LLM extracts prices in INR; Qdrant stores prices in USD.
+    # Divide by 83 to convert INR → USD before applying the Qdrant range filter.
+    _INR_TO_USD = 1 / 83
     conditions: list[FieldCondition] = []
     if filters.brand:
         conditions.append(
@@ -62,14 +105,13 @@ async def semantic_search(state: ShopSenseState) -> dict:
         conditions.append(
             FieldCondition(key="category", match=MatchValue(value=filters.category))
         )
-    if filters.max_price is not None or filters.min_price is not None:
+    max_usd = filters.max_price * _INR_TO_USD if filters.max_price is not None else None
+    min_usd = filters.min_price * _INR_TO_USD if filters.min_price is not None else None
+    if max_usd is not None or min_usd is not None:
         conditions.append(
             FieldCondition(
                 key="current_price",
-                range=Range(
-                    lte=filters.max_price,
-                    gte=filters.min_price,
-                ),
+                range=Range(lte=max_usd, gte=min_usd),
             )
         )
 
@@ -80,11 +122,11 @@ async def semantic_search(state: ShopSenseState) -> dict:
 
     # Step 5 — Rerank + over-budget search run concurrently (reranker takes ~200ms)
     overrun_filter: Filter | None = None
-    if filters.max_price is not None:
+    if max_usd is not None:
         overrun_filter = Filter(must=[
             FieldCondition(
                 key="current_price",
-                range=Range(gt=filters.max_price, lte=filters.max_price * 1.30),
+                range=Range(gt=max_usd, lte=max_usd * 1.30),
             )
         ])
 

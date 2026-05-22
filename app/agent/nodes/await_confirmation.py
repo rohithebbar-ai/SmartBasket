@@ -45,15 +45,18 @@ _AMBIGUOUS_REPROMPT = (
 
 async def await_confirmation(state: ShopSenseState) -> dict:
     # ── Pass 1: pause and surface the pending action description ─────────────
-    # interrupt() raises an internal LangGraph exception that serialises state
-    # and returns the value to the caller. Execution resumes here on the next
-    # graph.invoke() call with the same thread_id.
+    # interrupt() raises NodeInterrupt on first call, checkpoints state.
+    # On resume via Command(resume=value), interrupt() RETURNS the resume value
+    # instead of raising — execution continues from here.
     pending_description = state.get("pending_tool_description", "")
-    interrupt(pending_description)
+    user_reply: str = interrupt(pending_description)
 
     # ── Pass 2: classify the user's reply ────────────────────────────────────
-    messages: list[dict[str, str]] = state.get("messages", [])
-    user_reply = messages[-1].get("content", "") if messages else ""
+    # user_reply is the string passed by Command(resume=message) in the router.
+    # Fallback to messages[-1] in case an older resume path is used.
+    if not isinstance(user_reply, str) or not user_reply.strip():
+        messages: list[dict[str, str]] = state.get("messages", [])
+        user_reply = messages[-1].get("content", "") if messages else ""
     confirmation_context = state.get("confirmation_context", pending_description)
 
     prompt = CONFIRMATION_CLASSIFIER_PROMPT.format(
@@ -72,15 +75,30 @@ async def await_confirmation(state: ShopSenseState) -> dict:
         )
 
     if decision == "AMBIGUOUS":
-        # Re-ask and pause again. Execution resumes after this line on the next invoke().
-        interrupt(_AMBIGUOUS_REPROMPT)
-        # If the user is STILL ambiguous after the re-ask, the conditional edge routes
-        # back here for a fresh node call. Update pending_tool_description so that
-        # fresh call interrupts with the re-ask message rather than the original prompt.
+        # Re-ask once. Capture the return value so we can classify it.
+        second_reply: str = interrupt(_AMBIGUOUS_REPROMPT)
+        try:
+            raw2 = await call_llm(
+                CONFIRMATION_CLASSIFIER_PROMPT.format(
+                    confirmation_context=confirmation_context,
+                    message=second_reply,
+                ),
+                tier="fast", max_tokens=100, temperature=0.0,
+            )
+            out2 = ConfirmationOutput.model_validate_json(raw2)
+            decision = out2.decision
+        except Exception as exc:
+            log.warning("Second confirmation classification failed (%s) — defaulting to DECLINE", exc)
+            decision = "DECLINE"
+
+        # If still ambiguous after a second chance, decline to avoid infinite loops.
+        if decision == "AMBIGUOUS":
+            decision = "DECLINE"
+
+    if decision == "DECLINE":
         return {
-            "user_decision": "AMBIGUOUS",
-            "final_response": _AMBIGUOUS_REPROMPT,
-            "pending_tool_description": _AMBIGUOUS_REPROMPT,
+            "user_decision": "DECLINE",
+            "final_response": "No problem, I've cancelled that. What else can I help you with?",
         }
 
     return {"user_decision": decision}

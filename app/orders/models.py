@@ -35,7 +35,8 @@ class Order(Base):
     )
     total_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     status: Mapped[OrderStatus] = mapped_column(
-        SAEnum(OrderStatus, name="order_status", native_enum=False),
+        SAEnum(OrderStatus, name="order_status", native_enum=False,
+               values_callable=lambda obj: [e.value for e in obj]),
         nullable=False,
         default=OrderStatus.PENDING,
     )

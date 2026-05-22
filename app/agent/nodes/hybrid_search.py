@@ -45,24 +45,58 @@ async def _extract_filters(query: str) -> FilterExtractionOutput:
         return FilterExtractionOutput(rewritten_query=query)
 
 
+def _merge_filters(new: FilterExtractionOutput, prev: dict) -> FilterExtractionOutput:
+    """Carry forward constraints from the previous turn when the current message is a refinement."""
+    if not prev:
+        return new
+    if new.brand and prev.get("brand") and new.brand.lower() != prev["brand"].lower():
+        return new
+
+    updates: dict = {}
+    query_prefix: list[str] = []
+
+    if not new.brand and prev.get("brand"):
+        updates["brand"] = prev["brand"]
+        query_prefix.append(prev["brand"])
+    if new.max_price is None and prev.get("max_price"):
+        updates["max_price"] = prev["max_price"]
+    if new.min_price is None and prev.get("min_price"):
+        updates["min_price"] = prev["min_price"]
+    if not new.category and prev.get("category"):
+        updates["category"] = prev["category"]
+        query_prefix.append(prev["category"])
+
+    if not updates:
+        return new
+
+    if query_prefix:
+        updates["rewritten_query"] = f"{' '.join(query_prefix)} {new.rewritten_query}"
+
+    return new.model_copy(update=updates)
+
+
 async def hybrid_search(state: ShopSenseState) -> dict:
     messages = state.get("messages", [])
     query = messages[-1]["content"] if messages else ""
+    prev_filters = state.get("extracted_filters") or {}
 
-    # Run filter extraction and the full hybrid search concurrently
+    # Run filter extraction and hybrid search concurrently
     async with AsyncSessionLocal() as db:
         filters, results = await asyncio.gather(
             _extract_filters(query),
             _hybrid_search(query=query, db=db, top_k=10),
         )
+    filters = _merge_filters(filters, prev_filters)
 
-    # Supplementary over-budget Qdrant pass — runs after (fast, ~50ms)
+    # Supplementary over-budget Qdrant pass — prices in Qdrant are USD; convert from INR
+    _INR_TO_USD = 1 / 83
     budget_overrun: list = []
     if filters.max_price is not None:
+        max_usd = filters.max_price * _INR_TO_USD
         overrun_filter = Filter(must=[
             FieldCondition(
                 key="current_price",
-                range=Range(gt=filters.max_price, lte=filters.max_price * 1.30),
+                range=Range(gt=max_usd, lte=max_usd * 1.30),
             )
         ])
         try:

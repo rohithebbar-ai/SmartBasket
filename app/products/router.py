@@ -9,6 +9,7 @@ from app.database import get_db
 from app.products import service
 from app.products.models import PriceChangeReason
 from app.products.schemas import (
+    FrequentlyBoughtItem,
     ProductCreate,
     ProductDetailResponse,
     ProductFilters,
@@ -87,6 +88,16 @@ async def update_price(
     if product is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Product not found")
     return ProductResponse.model_validate(product)
+
+
+@router.get("/{product_id}/frequently-bought", response_model=list[FrequentlyBoughtItem])
+async def get_frequently_bought(
+    product_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> list[FrequentlyBoughtItem]:
+    """Top 3 products co-purchased with this product, ranked by co-occurrence frequency."""
+    rows = await service.get_frequently_bought_together(db, product_id)
+    return [FrequentlyBoughtItem(**r) for r in rows]
 
 
 @router.get("/{product_id}/reviews", response_model=list[ReviewResponse])

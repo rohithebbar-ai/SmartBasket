@@ -153,6 +153,17 @@ Schema:
 {schema_block}
 {user_scope_note}
 
+IMPORTANT — Currency:
+  Prices in the database are stored in USD (e.g. current_price = 265.99 means $265.99).
+  Users always ask in Indian Rupees (₹). Divide by 83 to convert INR → USD.
+  Example: user says "under ₹80,000" → SQL: current_price < 966
+  Example: user says "between ₹30K and ₹60K" → SQL: current_price BETWEEN 361 AND 723
+
+IMPORTANT — Laptop queries:
+  The dataset includes laptop accessories (RAM, backpacks, cases) also tagged as laptops.
+  When user asks for laptops, always add:
+    AND (name ILIKE '%laptop%' OR name ILIKE '%notebook%' OR name ILIKE '%chromebook%' OR name ILIKE '%macbook%' OR name ILIKE '%thinkpad%' OR name ILIKE '%ideapad%' OR name ILIKE '%elitebook%' OR name ILIKE '%spectre%' OR name ILIKE '%envy%' OR name ILIKE '%vivobook%')
+
 Rules:
 1. Generate SELECT queries ONLY. Never UPDATE, DELETE, DROP, INSERT, ALTER, TRUNCATE.
 2. Always add LIMIT 50 unless the question explicitly asks for all rows.

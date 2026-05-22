@@ -8,6 +8,15 @@ from pydantic import BaseModel, ConfigDict, Field
 
 # ── Filters ───────────────────────────────────────────────────────────────────
 
+class FrequentlyBoughtItem(BaseModel):
+    """Slim product projection returned by the frequently-bought endpoint."""
+    id: uuid.UUID
+    name: str
+    brand: str
+    current_price: Decimal
+    avg_rating: float
+
+
 class ProductFilters(BaseModel):
     """Query parameters for the product list endpoint."""
     brand: str | None = None
@@ -62,18 +71,26 @@ class ProductResponse(BaseModel):
     brand: str
     category: str
     base_price: Decimal
-    # current_price: reflects the live dynamic price. The service overlays the
-    # Redis-cached price on top of the DB value when available.
     current_price: Decimal
     specs: dict
     stock_count: int
     avg_rating: float
     is_active: bool
     created_at: datetime
+    # Sentiment scores — None until run_sentiment.py populates them
+    battery_sentiment:       float | None = None
+    display_sentiment:       float | None = None
+    build_quality_sentiment: float | None = None
+    value_sentiment:         float | None = None
+    performance_sentiment:   float | None = None
+    keyboard_sentiment:      float | None = None
+    thermal_sentiment:       float | None = None
+    top_complaint:           str | None = None
+    top_praise:              str | None = None
 
 
 class ProductDetailResponse(ProductResponse):
-    """Single-product response that includes the review list."""
+    """Single-product response that includes reviews."""
     reviews: list[ReviewResponse] = Field(default_factory=list)
 
 

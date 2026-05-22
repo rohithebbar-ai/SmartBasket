@@ -36,10 +36,14 @@ _MAX_RESULTS_IN_PROMPT = 5
 _MAX_SQL_ROWS_IN_PROMPT = 10
 
 
+_USD_TO_INR = 83
+
+
 def _format_product(r: dict, rank: int) -> str:
+    price_inr = r.get("current_price", 0) * _USD_TO_INR
     lines = [
         f"{rank}. {r.get('brand', '')} {r.get('name', '')}",
-        f"   Price: ₹{r.get('current_price', 0):,.0f}  |  Rating: {r.get('avg_rating', 0):.1f}/5",
+        f"   Price: ₹{price_inr:,.0f}  |  Rating: {r.get('avg_rating', 0):.1f}/5",
     ]
     specs = r.get("specs") or {}
     if specs:
@@ -83,7 +87,7 @@ def _build_budget_overrun_section(state: ShopSenseState) -> str:
     filters = state.get("extracted_filters") or {}
     max_price = filters.get("max_price")
     for r in overrun:
-        price = r.get("current_price", 0)
+        price = r.get("current_price", 0) * _USD_TO_INR
         premium = f"₹{price - max_price:,.0f} above budget" if max_price else ""
         specs = r.get("specs") or {}
         spec_note = ", ".join(f"{k}: {v}" for k, v in list(specs.items())[:2])

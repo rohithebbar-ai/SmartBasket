@@ -115,6 +115,11 @@ class Settings(BaseSettings):
     nvidia_api_key: str | None = None
     nvidia_model: str = "nvidia/nv-embedqa-e5-v5"
 
+    # ── Frontend ──────────────────────────────────────────────────────────────
+    # Set to your Vercel URL in production (e.g. https://shopsense.vercel.app).
+    # Localhost is always allowed for dev — this adds a second allowed origin.
+    frontend_url: str | None = None
+
     # ── MCP Server ────────────────────────────────────────────────────────────
     # MCP tools are mounted inside the main FastAPI app at /mcp — no separate
     # process or port. mcp_server_url points to the main app's /mcp prefix.
@@ -123,6 +128,12 @@ class Settings(BaseSettings):
     # ── External Services ─────────────────────────────────────────────────────
     sendgrid_api_key: str | None = None
     sendgrid_from_email: str = "noreply@shopsense.com"
+
+    # Gmail SMTP fallback — used when sendgrid_api_key is not set.
+    # Requires a Gmail App Password (not your regular password).
+    # Enable at: myaccount.google.com/apppasswords
+    gmail_user: str | None = None        # e.g. you@gmail.com
+    gmail_app_password: str | None = None  # 16-char app password
 
     stripe_secret_key: str | None = None
     stripe_webhook_secret: str | None = None

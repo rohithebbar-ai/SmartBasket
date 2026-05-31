@@ -153,7 +153,16 @@ def _call_mock(prompt: str, tier: str) -> str:
     # IntentOutput — intent classifier prompt contains all 10 intent names
     if "product_search" in p and "out_of_scope" in p:
         return '{"intent": "PRODUCT_SEARCH", "reasoning": "mock intent"}'
-    # FilterExtractionOutput
+    # Constraint extractor — extract the original query from "Query: ..." at the end of prompt
+    if "available filters" in p and "rewritten_query" in p:
+        import re as _re
+        m = _re.search(r"query:\s*(.+)$", prompt.strip(), _re.IGNORECASE | _re.MULTILINE)
+        raw_q = m.group(1).strip() if m else "product search"
+        return (
+            f'{{"rewritten_query": {raw_q!r}, "price_value": null, "price_currency": null, '
+            f'"price_type": null}}'
+        )
+    # FilterExtractionOutput (old agent path)
     if "rewritten_query" in p or "filter extraction" in p:
         return '{"rewritten_query": "gaming laptop", "max_price": null, "min_price": null, "brand": null, "category": null, "use_case": null, "features": []}'
     # QueryRouterOutput / QueryTypeRouterOutput (default fast-tier fallback)

@@ -49,6 +49,11 @@ dependencies = [
     # Data ingestion utilities
     "faker>=25.0.0",
     "python-dotenv>=1.0.0",
+    # ETL pipeline
+    "datasets>=2.20.0",          # HuggingFace datasets (streaming H&M catalogue)
+    "apscheduler>=3.10.0",       # Scheduled agents
+    "greenlet>=3.5.1",
+    "anthropic>=0.105.2",
 ]
 
 [project.optional-dependencies]
@@ -66,8 +71,10 @@ dev = [
 [tool.uv]
 # onnxruntime dropped Intel Mac (x86_64) wheels at 1.20.0.
 # flashrank pulls it in; pin to the last version with macOS x86_64 support.
+# arm64 (Apple Silicon) uses the latest available wheel.
 override-dependencies = [
     "onnxruntime==1.19.2 ; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    "onnxruntime>=1.17.0 ; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
 
 [build-system]
@@ -103,6 +110,9 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 addopts = "--cov=app --cov-report=term-missing -v -p no:faker -p no:langsmith_plugin"
+markers = [
+    "integration: marks tests that hit live external services (Bedrock, Qdrant, Redis). Run with: pytest -m integration",
+]
 
 [tool.coverage.run]
 omit = ["tests/*", "data/*", "workers/*"]

@@ -1,0 +1,38 @@
+{
+  "catalogue": "fashion",
+  "threshold": 0.85,
+  "cases": [
+    {"query": "I need something to wear to a beach wedding", "expected": "SEMANTIC"},
+    {"query": "cosy outfit for a rainy day at home", "expected": "SEMANTIC"},
+    {"query": "what should I wear for a first date", "expected": "SEMANTIC"},
+    {"query": "summer festival outfit ideas", "expected": "SEMANTIC"},
+    {"query": "smart casual look for a work presentation", "expected": "SEMANTIC"},
+    {"query": "comfortable outfit for a long flight", "expected": "SEMANTIC"},
+    {"query": "something flowy and feminine for brunch", "expected": "SEMANTIC"},
+    {"query": "winter layering outfit ideas", "expected": "SEMANTIC"},
+    {"query": "what goes well with high waisted jeans", "expected": "SEMANTIC"},
+    {"query": "effortless everyday look for running errands", "expected": "SEMANTIC"},
+
+    {"query": "which colour has the most products", "expected": "ANALYTICAL"},
+    {"query": "how many dresses do you have in stock", "expected": "ANALYTICAL"},
+    {"query": "what categories does H&M carry", "expected": "ANALYTICAL"},
+    {"query": "show me all products under $15", "expected": "ANALYTICAL"},
+    {"query": "which garment group has the highest average price", "expected": "ANALYTICAL"},
+    {"query": "how many products have a rating above 4", "expected": "ANALYTICAL"},
+    {"query": "list all available patterns", "expected": "ANALYTICAL"},
+    {"query": "what is the average price of jackets", "expected": "ANALYTICAL"},
+    {"query": "how many items are currently in stock", "expected": "ANALYTICAL"},
+    {"query": "which section has the most variety", "expected": "ANALYTICAL"},
+
+    {"query": "well-reviewed floral dress under $30", "expected": "HYBRID"},
+    {"query": "blue dress with good fit reviews", "expected": "HYBRID"},
+    {"query": "comfortable hoodie under $20 with high ratings", "expected": "HYBRID"},
+    {"query": "black formal blazer size M with good quality reviews", "expected": "HYBRID"},
+    {"query": "affordable summer dress under $25 in white or yellow", "expected": "HYBRID"},
+    {"query": "cosy knitwear with great comfort reviews under $35", "expected": "HYBRID"},
+    {"query": "striped top rated 4 stars or above under $20", "expected": "HYBRID"},
+    {"query": "well-reviewed winter coat under $60", "expected": "HYBRID"},
+    {"query": "versatile jeans under $40 with good style ratings", "expected": "HYBRID"},
+    {"query": "fitted dress for parties rated above 4 stars", "expected": "HYBRID"}
+  ]
+}

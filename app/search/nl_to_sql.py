@@ -2,7 +2,7 @@
 NL-to-SQL engine — centralized, used by all callers.
 
 Public interface:
-    run_nl_to_sql(query, schema_scope, user_id, source, use_few_shot) -> NLToSQLResult
+    run_nl_to_sql(query, schema_scope, user_id, source, use_few_shot, schema_hint) -> NLToSQLResult
 
 CRITICAL SAFETY RULES (enforced unconditionally):
   - SELECT only — validate_sql() rejects anything that isn't SELECT.
@@ -18,18 +18,39 @@ Callers:
   - app/agent/nodes/nl_to_sql_search.py (agent, source="agent")
 """
 
+from __future__ import annotations
+
 import logging
 import re
+from typing import Any
 
 import sqlparse
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from pydantic import RootModel
 
 from app.database import AsyncSessionLocal
 from app.llm import call_llm
 from app.schemas.search import NLToSQLResult
 
 log = logging.getLogger(__name__)
+
+
+class _SqlRow(RootModel[dict[str, Any]]):
+    pass
+
+
+def _validate_rows(rows: list[dict]) -> list[dict]:
+    """Validate each row is a dict. Drops invalid rows and logs a warning."""
+    valid = []
+    for i, row in enumerate(rows):
+        try:
+            valid.append(_SqlRow.model_validate(row).root)
+        except Exception as exc:
+            log.warning("Row %d failed validation, dropping: %s", i, exc)
+    return valid
+
 
 DANGEROUS_KEYWORDS = {"DROP", "DELETE", "UPDATE", "INSERT", "ALTER", "TRUNCATE"}
 
@@ -117,10 +138,14 @@ def _build_prompt(
     few_shot_examples: list[dict],
     previous_sql: str | None = None,
     previous_error: str | None = None,
+    schema_hint: str | None = None,
 ) -> str:
-    schema_block = "\n\n".join(
-        SCHEMA_MAP[t] for t in schema_scope if t in SCHEMA_MAP
-    )
+    if schema_hint:
+        schema_block = schema_hint
+    else:
+        schema_block = "\n\n".join(
+            SCHEMA_MAP[t] for t in schema_scope if t in SCHEMA_MAP
+        )
 
     few_shot_block = ""
     if few_shot_examples:
@@ -146,13 +171,7 @@ def _build_prompt(
             f"Fix the SQL and try again.\n"
         )
 
-    return f"""You are a SQL expert for the ShopSense e-commerce platform.
-Database: PostgreSQL (Supabase)
-
-Schema:
-{schema_block}
-{user_scope_note}
-
+    domain_notes = "" if schema_hint else """
 IMPORTANT — Currency:
   Prices in the database are stored in USD (e.g. current_price = 265.99 means $265.99).
   Users always ask in Indian Rupees (₹). Divide by 83 to convert INR → USD.
@@ -163,7 +182,15 @@ IMPORTANT — Laptop queries:
   The dataset includes laptop accessories (RAM, backpacks, cases) also tagged as laptops.
   When user asks for laptops, always add:
     AND (name ILIKE '%laptop%' OR name ILIKE '%notebook%' OR name ILIKE '%chromebook%' OR name ILIKE '%macbook%' OR name ILIKE '%thinkpad%' OR name ILIKE '%ideapad%' OR name ILIKE '%elitebook%' OR name ILIKE '%spectre%' OR name ILIKE '%envy%' OR name ILIKE '%vivobook%')
+"""
 
+    return f"""You are a SQL expert for the ShopSense e-commerce platform.
+Database: PostgreSQL (Supabase)
+
+Schema:
+{schema_block}
+{user_scope_note}
+{domain_notes}
 Rules:
 1. Generate SELECT queries ONLY. Never UPDATE, DELETE, DROP, INSERT, ALTER, TRUNCATE.
 2. Always add LIMIT 50 unless the question explicitly asks for all rows.
@@ -250,6 +277,7 @@ async def run_nl_to_sql(
     user_id: str | None = None,
     source: str = "customer",
     use_few_shot: bool = True,
+    schema_hint: str | None = None,
 ) -> NLToSQLResult:
     """
     Full pipeline: prompt → generate → validate → execute, with up to 2 retries.
@@ -262,6 +290,8 @@ async def run_nl_to_sql(
         user_id:      If set, engine adds WHERE user_id constraint for orders.
         source:       "customer" | "admin" | "agent" — stored in audit log.
         use_few_shot: Pull similar past queries from audit table as examples.
+        schema_hint:  Optional schema block override (replaces SCHEMA_MAP lookup
+                      and suppresses hardcoded electronics domain notes).
     """
     few_shot = await _fetch_few_shot(query) if use_few_shot else []
 
@@ -273,7 +303,7 @@ async def run_nl_to_sql(
     for attempt in range(3):  # 1 initial attempt + 2 retries
         prompt = _build_prompt(
             query, schema_scope, user_id, few_shot,
-            previous_sql, previous_error,
+            previous_sql, previous_error, schema_hint,
         )
 
         try:
@@ -312,7 +342,7 @@ async def run_nl_to_sql(
 
     # Validation passed — execute
     try:
-        rows = await _execute_sql(generated_sql, db)
+        rows = _validate_rows(await _execute_sql(generated_sql, db))
         result = NLToSQLResult(
             natural_language_query=query,
             generated_sql=generated_sql,

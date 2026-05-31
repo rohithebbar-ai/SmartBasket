@@ -133,11 +133,20 @@ async def _sql_ranking(query: str, db: AsyncSession) -> list[dict]:
 
 # ── Vector ranking path ───────────────────────────────────────────────────────
 
-def _vector_ranking_sync(query: str) -> list[ProductResult]:
+def _vector_ranking_sync(
+    query: str,
+    collection_name: str | None = None,
+    sentiment_fields: list[str] | None = None,
+) -> list[ProductResult]:
     """Embed query and search full Qdrant collection (sync — called via asyncio.to_thread)."""
     vector = embed(query)
-    # No filter — search the full corpus so RRF can score against SQL candidates
-    return qdrant_search(query_vector=vector, filters=None, top_k=50)
+    return qdrant_search(
+        query_vector=vector,
+        filters=None,
+        top_k=50,
+        sentiment_fields=sentiment_fields,
+        collection_name=collection_name,
+    )
 
 
 # ── RRF merge ─────────────────────────────────────────────────────────────────
@@ -220,14 +229,18 @@ async def hybrid_search(
     query: str,
     db: AsyncSession,
     top_k: int = 10,
+    collection_name: str | None = None,
+    sentiment_fields: list[str] | None = None,
 ) -> list[ProductResult]:
     """
     Run SQL ranking and vector ranking concurrently, merge with RRF.
 
     Args:
-        query:  Natural-language hybrid query (semantic intent + structured filters).
-        db:     AsyncSession for SQL execution.
-        top_k:  Number of results to return after RRF merge.
+        query:            Natural-language hybrid query (semantic intent + structured filters).
+        db:               AsyncSession for SQL execution.
+        top_k:            Number of results to return after RRF merge.
+        collection_name:  Qdrant collection to search. Defaults to settings.qdrant_collection_name.
+        sentiment_fields: Sentiment payload keys to include in results.
 
     Returns:
         ProductResult list sorted by rrf_score descending.
@@ -235,7 +248,7 @@ async def hybrid_search(
     """
     sql_rows, vector_results = await asyncio.gather(
         _sql_ranking(query, db),
-        asyncio.to_thread(_vector_ranking_sync, query),
+        asyncio.to_thread(_vector_ranking_sync, query, collection_name, sentiment_fields),
     )
 
     if not sql_rows and not vector_results:

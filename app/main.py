@@ -15,11 +15,19 @@ from app.orders.kafka_producer import close_producer as close_orders_producer
 from app.products.kafka import close_producer as close_products_producer
 from app.mcp.client import mcp_client
 from app.redis_client import close_pool, ping
+from app.search.catalogue_config import ELECTRONICS_CATALOGUE, FASHION_CATALOGUE
+from app.search.qdrant_ops import ensure_catalogue_indexes
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    # startup
+    # startup — ensure Qdrant payload indexes for all known catalogues
+    for catalogue in (FASHION_CATALOGUE, ELECTRONICS_CATALOGUE):
+        keyword_fields = [
+            a.key for a in catalogue.filterable_attrs if a.is_qdrant_filter
+        ]
+        ensure_catalogue_indexes(catalogue.qdrant_collection, keyword_fields)
+
     await start_orders_consumer()
     await start_search_consumer()
     await start_pricing_engine()

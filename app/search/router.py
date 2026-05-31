@@ -1,14 +1,17 @@
 """
-Search router — query-routed search endpoint.
+Search router — catalogue-aware, query-routed search endpoint.
 
 POST /api/search/
-    1. Classify query as SEMANTIC | ANALYTICAL | HYBRID (Bedrock Haiku, ~150ms, Redis-cached).
-    2. SEMANTIC   → embed → Qdrant top-20 → flashrank rerank → SearchResponse
-    3. ANALYTICAL → run_nl_to_sql → AnalyticsResponse
-    4. HYBRID     → RRF hybrid: SQL constrains candidates, Qdrant ranks within the filtered set.
+    1. Resolve catalogue config from body.catalogue (raises 400 on unknown).
+    2. Extract constraints from the query (rewritten query, hard filters, prices).
+    3. Classify query as SEMANTIC | ANALYTICAL | HYBRID (Bedrock Haiku, Redis-cached per catalogue).
+    4. SEMANTIC   → embed rewritten_query → Qdrant top-20 → flashrank rerank → SearchResponse
+    5. ANALYTICAL → run_nl_to_sql (with catalogue schema_hint) → AnalyticsResponse
+    6. HYBRID     → RRF hybrid: SQL constrains candidates, Qdrant ranks within the filtered set.
 
 Callers inspect `query_type` in the response to know which shape was returned.
 """
+from __future__ import annotations
 
 import asyncio
 import logging
@@ -20,6 +23,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.schemas.search import AnalyticsResponse, SearchResponse
+from app.search.catalogue_config import CatalogueConfig, get_catalogue
+from app.search.constraint_extractor import ConstraintOutput, extract_constraints
 from app.search.embedder import embed
 from app.search.hybrid_search import hybrid_search
 from app.search.nl_to_sql import run_nl_to_sql
@@ -30,7 +35,6 @@ from app.search.reranker import rerank
 log = logging.getLogger(__name__)
 router = APIRouter()
 
-# Tables available for customer-facing ANALYTICAL queries (no orders — user-scoped)
 SEARCH_ANALYTICAL_SCOPE = ["products", "reviews", "price_history"]
 
 
@@ -45,23 +49,27 @@ class SearchFilters(BaseModel):
 
 
 class SearchRequest(BaseModel):
-    query: str = Field(..., min_length=1, max_length=500, description="Natural-language search query")
+    query: str = Field(..., min_length=1, max_length=500)
+    catalogue: str = Field(default="fashion", description="Catalogue ID. Valid: fashion, electronics")
     filters: SearchFilters = Field(default_factory=SearchFilters)
-    top_k: int = Field(default=10, ge=1, le=50, description="Number of results to return after reranking")
-
-
-# DB and Qdrant store prices in USD; callers send INR values.
-_INR_TO_USD = 83.0
+    top_k: int = Field(default=10, ge=1, le=50)
 
 
 # ── Filter builder ────────────────────────────────────────────────────────────
 
-def _build_qdrant_filter(f: SearchFilters) -> Filter | None:
+def _build_qdrant_filter(
+    f: SearchFilters,
+    hard_filters: dict[str, str | None],
+    constraints: ConstraintOutput,
+) -> Filter | None:
     conditions: list[FieldCondition] = []
+
+    for key, value in hard_filters.items():
+        if value:
+            conditions.append(FieldCondition(key=key, match=MatchValue(value=value)))
 
     if f.brand:
         conditions.append(FieldCondition(key="brand", match=MatchValue(value=f.brand)))
-
     if f.category:
         conditions.append(FieldCondition(key="category", match=MatchValue(value=f.category)))
 
@@ -69,10 +77,21 @@ def _build_qdrant_filter(f: SearchFilters) -> Filter | None:
         conditions.append(FieldCondition(
             key="current_price",
             range=Range(
-                gte=f.min_price / _INR_TO_USD if f.min_price is not None else None,
-                lte=f.max_price / _INR_TO_USD if f.max_price is not None else None,
+                gte=f.min_price if f.min_price is not None else None,
+                lte=f.max_price if f.max_price is not None else None,
             ),
         ))
+    else:
+        if constraints.max_price is not None:
+            conditions.append(FieldCondition(
+                key="current_price",
+                range=Range(lte=constraints.max_price),
+            ))
+        if constraints.min_price is not None:
+            conditions.append(FieldCondition(
+                key="current_price",
+                range=Range(gte=constraints.min_price),
+            ))
 
     if f.in_stock_only:
         conditions.append(FieldCondition(key="stock_available", match=MatchValue(value=True)))
@@ -88,13 +107,17 @@ async def product_search(
     db: AsyncSession = Depends(get_db),
 ) -> SearchResponse | AnalyticsResponse:
     """
-    1. Classify query type (SEMANTIC | ANALYTICAL | HYBRID) via Bedrock Haiku.
-    2. SEMANTIC:   embed → Qdrant → rerank → SearchResponse
-    3. ANALYTICAL: NL-to-SQL → AnalyticsResponse (no insight synthesis — raw results)
-    4. HYBRID:     RRF hybrid search — SQL filters candidate set, Qdrant ranks within it
+    1. Resolve catalogue and extract constraints (rewritten query, hard filters, prices).
+    2. Classify query type (SEMANTIC | ANALYTICAL | HYBRID) via Bedrock Haiku.
+    3. SEMANTIC:   embed rewritten_query → Qdrant → rerank → SearchResponse
+    4. ANALYTICAL: NL-to-SQL with catalogue schema_hint → AnalyticsResponse
+    5. HYBRID:     RRF hybrid search
     """
-    routing = await classify_query(body.query)
-    log.info("Search routing: query_type=%s query='%.80s'", routing.type, body.query)
+    config: CatalogueConfig = get_catalogue(body.catalogue)
+
+    constraints = await extract_constraints(body.query, config)
+    routing = await classify_query(body.query, config=config)
+    log.info("Search routing: catalogue=%s query_type=%s query='%.80s'", config.client_id, routing.type, body.query)
 
     # ── ANALYTICAL ────────────────────────────────────────────────────────────
     if routing.type == "ANALYTICAL":
@@ -104,6 +127,7 @@ async def product_search(
             db=db,
             source="customer",
             use_few_shot=True,
+            schema_hint=config.schema_hint,
         )
         if not result.validation_passed:
             raise HTTPException(
@@ -118,13 +142,19 @@ async def product_search(
             question=body.query,
             sql=result.generated_sql,
             results=result.rows,
-            insight="",   # no Sonnet synthesis on the search path — speed matters
+            insight="",
             rows_returned=result.rows_returned,
         )
 
     # ── HYBRID ────────────────────────────────────────────────────────────────
     if routing.type == "HYBRID":
-        results = await hybrid_search(query=body.query, db=db, top_k=body.top_k)
+        results = await hybrid_search(
+            query=constraints.rewritten_query,
+            db=db,
+            top_k=body.top_k,
+            collection_name=config.qdrant_collection,
+            sentiment_fields=config.sentiment_fields,
+        )
         return SearchResponse(
             query=body.query,
             query_type="HYBRID",
@@ -133,10 +163,11 @@ async def product_search(
         )
 
     # ── SEMANTIC ──────────────────────────────────────────────────────────────
-    vector = await asyncio.to_thread(embed, body.query)
-
-    qdrant_filter = _build_qdrant_filter(body.filters)
-    candidates = await asyncio.to_thread(search, vector, qdrant_filter, 20)
+    vector = await asyncio.to_thread(embed, constraints.rewritten_query)
+    qdrant_filter = _build_qdrant_filter(body.filters, constraints.hard_filters, constraints)
+    candidates = await asyncio.to_thread(
+        search, vector, qdrant_filter, 20, config.sentiment_fields, config.qdrant_collection
+    )
 
     if not candidates:
         return SearchResponse(query=body.query, query_type="SEMANTIC", results=[], total=0)

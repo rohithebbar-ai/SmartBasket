@@ -3,9 +3,9 @@ Qdrant client wrapper — all vector DB operations go through here.
 
 Public interface:
     get_client() -> QdrantClient
-    ensure_collection() -> None          # idempotent; call at startup
-    upsert(product_id, vector, payload)  # single-point upsert
-    search(query_vector, filters, top_k) -> list[ProductResult]
+    ensure_collection() -> None                              # idempotent; call at startup
+    upsert(product_id, vector, payload)                      # single-point upsert
+    search(query_vector, filters, top_k, sentiment_fields)   -> list[ProductResult]
 
 Filters are standard Qdrant Filter objects — callers build them using
 qdrant_client.models (FieldCondition, MatchValue, Range, etc.) and pass
@@ -16,6 +16,8 @@ The client uses Qdrant Cloud in production (QDRANT_URL + QDRANT_API_KEY)
 and local Docker in development (QDRANT_URL only).  No code change needed —
 set the env vars.
 """
+
+from __future__ import annotations
 
 import json
 import logging
@@ -99,6 +101,26 @@ def _ensure_payload_indexes(client: QdrantClient) -> None:
     log.debug("Payload indexes ensured for collection '%s'", col)
 
 
+def ensure_catalogue_indexes(collection_name: str, keyword_fields: list[str]) -> None:
+    """
+    Create KEYWORD payload indexes for all hard-filter attrs in a catalogue.
+    Called at startup for every CatalogueConfig so Qdrant filters don't 400.
+    Idempotent — safe to call on every restart.
+    """
+    client = get_client()
+    existing = {c.name for c in client.get_collections().collections}
+    if collection_name not in existing:
+        log.debug("Collection '%s' not found — skipping index creation", collection_name)
+        return
+    for field in keyword_fields:
+        client.create_payload_index(
+            collection_name=collection_name,
+            field_name=field,
+            field_schema=PayloadSchemaType.KEYWORD,
+        )
+    log.info("Keyword indexes ensured for '%s': %s", collection_name, keyword_fields)
+
+
 # ── Write ─────────────────────────────────────────────────────────────────────
 
 def upsert(product_id: str, vector: list[float], payload: dict) -> None:
@@ -110,12 +132,31 @@ def upsert(product_id: str, vector: list[float], payload: dict) -> None:
     )
 
 
+def upsert_batch(points: list[tuple[str, list[float], dict]]) -> None:
+    """
+    Upsert a batch of (product_id, vector, payload) tuples in one API call.
+    More efficient than calling upsert() in a loop for large ingestion batches.
+    """
+    if not points:
+        return
+    get_client().upsert(
+        collection_name=settings.qdrant_collection_name,
+        points=[
+            PointStruct(id=product_id, vector=vector, payload=payload)
+            for product_id, vector, payload in points
+        ],
+        wait=True,
+    )
+
+
 # ── Read ──────────────────────────────────────────────────────────────────────
 
 def search(
     query_vector: list[float],
     filters: Filter | None = None,
     top_k: int = 20,
+    sentiment_fields: list[str] | None = None,
+    collection_name: str | None = None,
 ) -> list[ProductResult]:
     """
     Vector similarity search.  Returns up to top_k results as ProductResult objects.
@@ -125,42 +166,32 @@ def search(
     """
     client = get_client()
     hits: list[ScoredPoint] = client.query_points(
-        collection_name=settings.qdrant_collection_name,
+        collection_name=collection_name or settings.qdrant_collection_name,
         query=query_vector,
         query_filter=filters,
         limit=top_k,
         with_payload=True,
     ).points
 
-    return [_scored_point_to_result(hit) for hit in hits]
+    return [_scored_point_to_result(hit, sentiment_fields or []) for hit in hits]
 
 
 # ── Payload → ProductResult ───────────────────────────────────────────────────
 
-_SENTIMENT_KEYS = (
-    "battery_sentiment",
-    "display_sentiment",
-    "build_quality_sentiment",
-    "value_sentiment",
-    "performance_sentiment",
-    "keyboard_sentiment",
-    "thermal_sentiment",
-)
 
-
-def _scored_point_to_result(hit: ScoredPoint) -> ProductResult:
+def _scored_point_to_result(hit: ScoredPoint, sentiment_fields: list[str] | None = None) -> ProductResult:
     p = hit.payload or {}
 
-    specs: dict = {}
-    if p.get("specs_json"):
+    attributes: dict = {}
+    if p.get("attributes_json"):
         try:
-            specs = json.loads(p["specs_json"])
+            attributes = json.loads(p["attributes_json"])
         except (json.JSONDecodeError, TypeError):
-            specs = {}
+            attributes = {}
 
     sentiment_scores = {
         key: p[key]
-        for key in _SENTIMENT_KEYS
+        for key in (sentiment_fields or [])
         if p.get(key) is not None
     }
 
@@ -173,7 +204,11 @@ def _scored_point_to_result(hit: ScoredPoint) -> ProductResult:
         avg_rating=float(p["avg_rating"]) if p.get("avg_rating") is not None else 0.0,
         relevance_score=float(hit.score),
         stock_available=bool(p.get("stock_available", True)),
-        specs=specs,
+        image_url=p.get("image_url"),
+        description=p.get("description", ""),
+        attributes=attributes,
         sentiment_scores=sentiment_scores,
+        top_praise=p.get("top_praise"),
+        top_complaint=p.get("top_complaint"),
         use_cases=p.get("use_cases") or [],
     )

@@ -68,4 +68,6 @@ async def save_history(state: ShopSenseState) -> dict:
         # History write failure is non-fatal — the user still gets their response.
         log.warning("save_history failed for session %s: %s", session_id, exc)
 
-    return {}
+    # Return the full updated messages list so LangSmith's Turns view shows the
+    # complete conversation (user + assistant) rather than just the user message.
+    return {"messages": (messages[:-1] if messages else []) + new_turns}

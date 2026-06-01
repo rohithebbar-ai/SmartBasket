@@ -85,14 +85,20 @@ def _strip_fences(text: str) -> str:
 
 # ── Provider implementations ──────────────────────────────────────────────────
 
-def _call_bedrock_sync(prompt: str, model_id: str, max_tokens: int, temperature: float) -> str:
+def _call_bedrock_sync(prompt: str, model_id: str, max_tokens: int, temperature: float) -> dict:
     response = _get_bedrock().converse(
         modelId=model_id,
         messages=[{"role": "user", "content": [{"text": prompt}]}],
         inferenceConfig={"maxTokens": max_tokens, "temperature": temperature},
     )
     raw = response["output"]["message"]["content"][0]["text"].strip()
-    return _strip_fences(raw)
+    usage = response.get("usage", {})
+    return {
+        "text": _strip_fences(raw),
+        "input_tokens": usage.get("inputTokens", 0),
+        "output_tokens": usage.get("outputTokens", 0),
+        "model_id": model_id,
+    }
 
 
 async def _call_bedrock(prompt: str, tier: str, max_tokens: int, temperature: float) -> str:
@@ -100,9 +106,29 @@ async def _call_bedrock(prompt: str, tier: str, max_tokens: int, temperature: fl
         settings.bedrock_fast_model_id if tier == "fast"
         else settings.bedrock_generation_model_id
     )
-    return await asyncio.to_thread(
+    result = await asyncio.to_thread(
         _call_bedrock_sync, prompt, model_id, max_tokens, temperature
     )
+    # Report token usage to the active LangSmith run so Cost & Tokens shows up
+    if _HAS_LANGSMITH:
+        try:
+            from langsmith import get_current_run_tree
+            rt = get_current_run_tree()
+            if rt:
+                rt.end(
+                    outputs={"text": result["text"]},
+                    extra={
+                        "usage": {
+                            "prompt_tokens": result["input_tokens"],
+                            "completion_tokens": result["output_tokens"],
+                            "total_tokens": result["input_tokens"] + result["output_tokens"],
+                        },
+                        "model_name": result["model_id"],
+                    },
+                )
+        except Exception:
+            pass
+    return result["text"]
 
 
 async def _call_groq(prompt: str, tier: str, max_tokens: int, temperature: float) -> str:

@@ -28,6 +28,8 @@ class CatalogueConfig:
     schema_hint: str
     routing_examples: list[tuple[str, str]]
     embedding_fields: list[str]
+    # Domain-specific tips injected into SYNTHESIS_PROMPT. All domain knowledge lives here.
+    synthesis_domain_tips: str = ""
 
 
 FASHION_CATALOGUE = CatalogueConfig(
@@ -110,6 +112,14 @@ FASHION_CATALOGUE = CatalogueConfig(
         "-- external_product_id VARCHAR  -- non-null = H&M product\n"
         "-- Price is stored in USD. Users may ask in ₹ — convert: ₹3000 ≈ $36"
     ),
+    synthesis_domain_tips=(
+        "Casual → versatility for different settings, everyday comfort, care instructions\n"
+        "Office/Formal → fabric quality, fit precision, whether it suits meetings\n"
+        "Evening/Party → standout design feature, what to pair it with, occasion fit\n"
+        "Active/Sports → breathability, stretch, durability\n"
+        "Gifting → occasion relevance, size universality, style breadth\n"
+        "Always mention the occasion a piece suits best and one standout feature that justifies the recommendation."
+    ),
 )
 
 ELECTRONICS_CATALOGUE = CatalogueConfig(
@@ -175,6 +185,12 @@ ELECTRONICS_CATALOGUE = CatalogueConfig(
         "-- value_sentiment, performance_sentiment  FLOAT\n"
         "-- is_active BOOLEAN           -- always filter is_active = true\n"
         "-- Price is stored in USD. Users may ask in ₹ — divide by 83."
+    ),
+    synthesis_domain_tips=(
+        "AI/ML → VRAM, CUDA support, RAM ≥ 16 GB\n"
+        "Gaming → GPU tier, refresh rate, thermal headroom\n"
+        "Video editing → CPU core count, colour accuracy, storage speed\n"
+        "Travel → weight, battery life, build quality"
     ),
 )
 

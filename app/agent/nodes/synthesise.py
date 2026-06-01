@@ -23,6 +23,7 @@ from app.agent.state import ShopSenseState
 from app.database import AsyncSessionLocal
 from app.llm import call_llm
 from app.redis_client import get_redis_client
+from app.search.catalogue_config import get_catalogue
 from sqlalchemy import text
 
 log = logging.getLogger(__name__)
@@ -45,10 +46,11 @@ def _format_product(r: dict, rank: int) -> str:
         f"{rank}. {r.get('brand', '')} {r.get('name', '')}",
         f"   Price: ₹{price_inr:,.0f}  |  Rating: {r.get('avg_rating', 0):.1f}/5",
     ]
-    specs = r.get("specs") or {}
-    if specs:
-        spec_pairs = [f"{k}: {v}" for k, v in list(specs.items())[:4]]
-        lines.append("   Specs: " + ", ".join(spec_pairs))
+    # specs for electronics; attributes for fashion — fall back gracefully
+    display_data = r.get("specs") or r.get("attributes") or {}
+    if display_data:
+        spec_pairs = [f"{k}: {v}" for k, v in list(display_data.items())[:4]]
+        lines.append("   Details: " + ", ".join(spec_pairs))
     sentiment = r.get("sentiment_scores") or {}
     if sentiment:
         top_sentiments = sorted(sentiment.items(), key=lambda x: x[1], reverse=True)[:3]
@@ -160,6 +162,12 @@ async def synthesise(state: ShopSenseState) -> dict:
     context_block = _build_context_block(state, query_type)
     budget_overrun_section = _build_budget_overrun_section(state)
 
+    try:
+        config = get_catalogue(state.get("catalogue") or "fashion")
+        domain_tips = config.synthesis_domain_tips
+    except Exception:
+        domain_tips = ""
+
     prompt = SYNTHESIS_PROMPT.format(
         question=question,
         query_type=query_type,
@@ -168,6 +176,7 @@ async def synthesise(state: ShopSenseState) -> dict:
         use_case=use_case,
         budget_context=budget_context,
         user_preferences=json.dumps(user_preferences) if user_preferences else "none",
+        domain_tips=domain_tips,
     )
 
     review_nudge = await _build_review_nudge(state)

@@ -101,3 +101,22 @@ class ShopSenseState(TypedDict, total=False):
     cart_action: dict[str, Any]  # {id, name, brand, current_price, quantity}
     cart_cleared: bool           # True after successful payment — signals frontend to clear localStorage cart
     cross_sell_products: list[dict[str, Any]]  # [{product_id, name, current_price, avg_rating}] shown as UI cards
+
+    # ── Catalogue context ─────────────────────────────────────────────────────
+    # Which catalogue the user is shopping in. Passed from the ChatRequest body.
+    # All catalogue-aware nodes read this to look up CatalogueConfig via get_catalogue().
+    catalogue: str                      # "fashion" | "electronics" | any registered id
+
+    # ── Session-level context (domain-agnostic) ───────────────────────────────
+    # visual_attributes: written by a future visual_search node after image analysis.
+    #   fashion → {colour, pattern}; electronics → {form_factor, port_layout}
+    visual_attributes: dict[str, Any]
+
+    # occasion_context: what setting the user shops for, inferred from conversation.
+    #   fashion → "wedding", "gym"; electronics → "travel", "studio"
+    occasion_context: str
+
+    # style_preference: running profile built from session clicks / refinements.
+    #   fashion → {"style": "minimalist", "fit": "relaxed"}
+    #   electronics → {"priority": "battery", "form": "lightweight"}
+    style_preference: dict[str, Any]

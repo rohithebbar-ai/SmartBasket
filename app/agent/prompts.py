@@ -51,7 +51,7 @@ Respond with JSON only — no markdown, no explanation outside the JSON:
 # Classifies the user's message into one of 10 intents.
 # Returns: {"intent": "<INTENT>", "reasoning": "<one sentence>"}
 
-INTENT_CLASSIFIER_PROMPT = """You are ShopSense, an AI assistant for a consumer electronics store.
+INTENT_CLASSIFIER_PROMPT = """You are ShopSense, an AI assistant for {store_name}.
 Classify the user's latest message into exactly one intent.
 
 Recent conversation (for context only — classify the LATEST message):
@@ -62,8 +62,7 @@ Latest message: {message}
 Intents and examples
 --------------------
 PRODUCT_SEARCH — user wants to discover or find products
-  "show me gaming laptops under 80k"
-  "what's a good laptop for college students"
+{product_search_examples}
 
 COMPARE — user wants a side-by-side comparison of specific products
   "compare Dell XPS 15 vs HP Spectre x360"
@@ -263,12 +262,9 @@ SEMANTIC / HYBRID (1–3 products):
 
 USE-CASE TIPS — ONLY when use_case is explicitly set (not "none" or null):
   Add a short "Key considerations for {use_case}" section ONLY if the user asked
-  specifically for that use case. Do NOT add gaming tips for a generic laptop search.
-  When relevant:
-    AI/ML → VRAM, CUDA support, RAM ≥ 16 GB
-    Gaming → GPU tier, refresh rate, thermal headroom
-    Video editing → CPU core count, colour accuracy, storage speed
-    Travel → weight, battery life, build quality
+  specifically for that use case. Do NOT infer a use case — only apply when explicit.
+  Domain-specific guidance:
+{domain_tips}
 
 BUDGET OVERFLOW — when budget_overrun_section is not empty:
   After the within-budget picks, present the over-budget options with the exact

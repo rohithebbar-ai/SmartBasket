@@ -165,14 +165,23 @@ class TestQueryRouting:
         assert "results" in body
 
     def test_classify_query_is_called_with_the_query_string(self, client: TestClient):
+        from unittest.mock import ANY
+        from app.search.constraint_extractor import ConstraintOutput
+        mock_constraints = ConstraintOutput(
+            rewritten_query="portable travel laptop",
+            max_price=None, min_price=None,
+            hard_filters={}, soft_attrs={},
+            detected_currency="USD", occasion=None,
+        )
         with (
+            patch("app.search.router.extract_constraints", new_callable=AsyncMock, return_value=mock_constraints),
             patch("app.search.router.classify_query", return_value=_semantic_routing()) as mock_classify,
             patch("app.search.router.embed", return_value=_FAKE_VECTOR),
             patch("app.search.router.search", return_value=[]),
         ):
             client.post("/api/search/", json={"query": "portable travel laptop"})
 
-        mock_classify.assert_called_once_with("portable travel laptop")
+        mock_classify.assert_called_once_with("portable travel laptop", config=ANY)
 
     def test_embed_not_called_for_analytical_query(self, client: TestClient):
         from app.schemas.search import NLToSQLResult
@@ -265,7 +274,15 @@ class TestSemanticSearch:
         assert resp.status_code == 422
 
     def test_search_passes_query_to_embed(self, client: TestClient):
+        from app.search.constraint_extractor import ConstraintOutput
+        mock_constraints = ConstraintOutput(
+            rewritten_query="thin and light travel laptop",
+            max_price=None, min_price=None,
+            hard_filters={}, soft_attrs={},
+            detected_currency="USD", occasion=None,
+        )
         with (
+            patch("app.search.router.extract_constraints", new_callable=AsyncMock, return_value=mock_constraints),
             patch("app.search.router.classify_query", return_value=_semantic_routing()),
             patch("app.search.router.embed", return_value=_FAKE_VECTOR) as mock_embed,
             patch("app.search.router.search", return_value=[]),

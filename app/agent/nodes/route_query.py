@@ -19,6 +19,7 @@ Writes to state: query_type
 import logging
 
 from app.agent.state import ShopSenseState
+from app.search.catalogue_config import get_catalogue
 from app.search.query_router import classify_query
 
 log = logging.getLogger(__name__)
@@ -64,7 +65,12 @@ async def route_query(state: ShopSenseState) -> dict:
     )
 
     try:
-        result = await classify_query(current_message, history=history)
+        config = get_catalogue(state.get("catalogue") or "fashion")
+    except Exception:
+        config = None
+
+    try:
+        result = await classify_query(current_message, history=history, config=config)
         query_type = result.type
     except Exception as exc:
         log.warning("Query type routing failed (%s) — defaulting to %s", exc, _DEFAULT_QUERY_TYPE)

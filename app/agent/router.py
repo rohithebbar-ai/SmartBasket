@@ -52,6 +52,7 @@ router = APIRouter()
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=2000)
     session_id: str = Field(default="", description="Reuse across turns; generated if empty")
+    catalogue: str = Field(default="fashion", description="Catalogue ID. Valid: fashion, electronics")
 
 
 def _sse(payload: dict) -> str:
@@ -62,6 +63,7 @@ async def _stream_graph(
     message: str,
     session_id: str,
     user_id: str,
+    catalogue: str = "fashion",
 ) -> AsyncGenerator[str, None]:
     config = {"configurable": {"thread_id": session_id}}
 
@@ -82,6 +84,7 @@ async def _stream_graph(
             "messages": [{"role": "user", "content": message}],
             "session_id": session_id,
             "user_id": user_id,
+            "catalogue": catalogue,
         }
 
     # ── Checkout context shortcut ─────────────────────────────────────────────
@@ -229,7 +232,7 @@ async def chat(
     user_id = str(current_user.id) if current_user else ""
 
     return StreamingResponse(
-        _stream_graph(body.message, session_id, user_id),
+        _stream_graph(body.message, session_id, user_id, body.catalogue),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

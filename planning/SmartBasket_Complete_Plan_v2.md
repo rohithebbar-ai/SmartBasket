@@ -1402,19 +1402,103 @@ Re-run the intent classifier quality gate (20 fashion queries, ≥90% accuracy).
 
 ---
 
-### Day 22 — Visual Search Agent
+### Day 22 — Visual Search Agent (CLIP + Separate Docker Service)
 
-Build the new capability that ShopSense did not have.
+> **Architecture decision (2026-06-01):** Original plan used Bedrock Sonnet vision for attribute extraction. Replaced with local CLIP zero-shot classification to eliminate per-image Bedrock cost entirely (~$0.005–0.015/call saved) and reduce latency from ~1000ms to ~55ms. Decision driven by demo AWS credit constraints ($100 remaining) and the realisation that CLIP zero-shot over Redis attribute sets is more accurate than free-form LLM extraction (LLM can hallucinate colours not in the catalogue; CLIP always picks from the real Redis values). If results are unsatisfactory after the demo, swap back to Bedrock vision — the interface is identical.
 
-Write `app/agent/nodes/visual_search.py`. Accepts `base64_image` from `SmartBasketState`. Builds a Bedrock Sonnet vision prompt: "Analyse this clothing item and extract: 1) Dominant colour (be specific — 'navy blue' not 'blue'), 2) Garment type, 3) Style keywords (3–5 words), 4) Occasion suitability (casual/work/formal/sport/party/beach), 5) Visible patterns or prints, 6) Notable details (collar type, sleeve length, hemline). Return JSON only." Parse the response into a structured dict. Generate a natural-language embedding text from the extracted attributes. Call `embed()` with `task="retrieval.query"`. Search Qdrant with the embedding plus any payload filters from the visual attributes (e.g., filter by `garment_type` and `occasion`).
+#### Why CLIP, not direct embedding comparison
 
-Update `POST /chat` endpoint in `app/agent/router.py` to accept `multipart/form-data` with an optional image file alongside the message JSON. Base64-encode the image and store in state before graph invocation.
+CLIP (Contrastive Language-Image Pretraining) learns a shared vector space for images and text. However, the `hm_products` Qdrant collection was embedded with **Jina v3 text embeddings** — a completely different vector space. A CLIP image vector compared directly against a Jina text vector is meaningless (different models, different dimensions, unaligned spaces).
 
-Update the supervisor node to detect image presence in state and route to VISUAL intent even if the message text is vague ("find something like this", "show me similar items").
+Instead we use CLIP for **zero-shot classification**:
+1. CLIP image-encodes the uploaded photo → image vector (512-dim, internal)
+2. CLIP text-encodes every attribute value from Redis (colours, patterns, categories) → text vectors — **pre-cached at service startup**
+3. cosine_similarity(image_vec, each_text_vec) → pick the highest-scoring label per attribute
+4. Output: `{colour: "Black", pattern: "Solid", category: "Dresses"}` — guaranteed to be real catalogue values
+5. Build `rewritten_query` from those attributes → Jina text embed → Qdrant search (normal path)
 
-Write integration test: upload an H&M product image, verify the visual search returns products with similar visual attributes. Test with a blue floral dress image — top results should be blue and/or floral dresses.
+CLIP handles image→attributes. Jina handles attributes→Qdrant. They never compare vectors with each other.
 
-**Demo at end of Day 22:** Screenshot a product from the H&M website, upload it via the chat interface, get back visually similar products. The attribute extraction shows in the LangSmith trace: "colour: midnight blue, garment type: midi dress, style: elegant, occasion: formal/party". Results are visually similar in at least 3 out of 5 cases.
+#### Deployment architecture: separate Docker container, same EC2
+
+**Do not** add CLIP/PyTorch to the main FastAPI container. PyTorch alone is ~2GB in a Docker image and would bloat the main app image and increase EC2 memory pressure.
+
+```
+EC2 t3.large (8GB RAM)
+└── docker-compose
+    ├── app           (FastAPI, ~1.5GB RAM, lean image, no torch)
+    ├── clip-service  (FastAPI :8001, ~800MB RAM, owns torch + open-clip-torch)
+    ├── redis         (~200MB)
+    └── postgres / Supabase
+```
+
+The main app calls `http://clip-service:8001/classify` over Docker's internal network (~1ms overhead). If the CLIP service is down, `visual_search` node returns the graceful stub — rest of the app is unaffected.
+
+**EC2 sizing:** t3.medium (4GB) is tight with CLIP added. Move to **t3.large (8GB, ~$60/mo)** when deploying Day 22.
+
+#### Build order
+
+**Step 1 — `Dockerfile.clip`**
+```dockerfile
+FROM python:3.11-slim
+RUN pip install open-clip-torch fastapi uvicorn redis aioredis
+# open-clip-torch is lighter than full transformers+torch (~1.2GB vs ~2.5GB)
+COPY workers/clip_service.py .
+CMD ["uvicorn", "clip_service:app", "--host", "0.0.0.0", "--port", "8001"]
+```
+
+**Step 2 — `workers/clip_service.py`** (standalone FastAPI service)
+- On startup: load `ViT-B/32`, read Redis attribute sets, CLIP-encode all values, cache in memory
+- `POST /classify` accepts `{"image_b64": "..."}`, returns `{"colour": "Black", "pattern": "Solid", "category": "Dresses", "scores": {...}}`
+- Confidence threshold: if top score < 0.20, set attribute to `null` (don't force a bad filter)
+- `/health` endpoint for docker-compose healthcheck
+
+**Step 3 — `docker-compose.yml`** — add `clip-service` block with `depends_on: [redis]`
+
+**Step 4 — `app/agent/nodes/visual_search.py`** (replace current stub)
+- Read `state.visual_attributes["image_b64"]`
+- POST to `http://clip-service:8001/classify`
+- Build `rewritten_query` from non-null attributes
+- Call `extract_constraints()` with the rewritten query + config to get hard filters
+- Proceed to normal semantic search path (reuse `semantic_search` logic)
+
+**Step 5 — `app/agent/router.py`** — update `POST /chat` to accept `multipart/form-data` with optional image; base64-encode and store in `state.visual_attributes`
+
+**Step 6 — `app/agent/nodes/supervisor.py`** — detect `state.visual_attributes` non-empty → override intent to VISUAL regardless of message text ("find something like this", vague references)
+
+**Step 7 — synthesis prompt** — for VISUAL query_type, mention which visual attributes were detected ("Found items matching your uploaded image: Black, Solid, Dresses")
+
+#### Latency breakdown (CPU, t3.large)
+
+| Step | Time |
+|------|------|
+| CLIP image encode (one forward pass) | ~50ms |
+| cosine similarity over cached text vecs | ~5ms |
+| HTTP to clip-service (internal Docker) | ~1ms |
+| Jina text embed (existing path) | ~80ms |
+| Qdrant search | ~30ms |
+| **Total visual search** | **~170ms** |
+
+Compare to original Bedrock Sonnet vision path: ~1000–1500ms. CLIP is ~8x faster.
+
+#### Cost
+
+- CLIP inference: **$0** (local)
+- Per visual search request: **$0 Bedrock spend**
+- EC2 cost increase: ~$30/mo (t3.medium → t3.large)
+
+#### Synthesis model — switch to Haiku across all paths
+
+Simultaneously with Day 22: update `CatalogueConfig.synthesis_model_tier` (new field, default `"fast"`) so synthesis uses **Haiku** instead of Sonnet. Sonnet is ~5x more expensive per token. For fashion recommendations the quality difference is acceptable for a demo. Can be toggled back to Sonnet per-catalogue when budget allows.
+
+```python
+# catalogue_config.py
+synthesis_model_tier: str = "fast"   # "fast" = Haiku, "generation" = Sonnet
+```
+
+Pass to `synthesise.py` → `call_llm(prompt, tier=config.synthesis_model_tier, ...)`.
+
+**Demo at end of Day 22:** Upload an H&M product photo via the chat interface. `visual_search` node calls the CLIP service, extracts colour/pattern/category, returns visually similar products from Qdrant. LangSmith trace shows the CLIP attributes and the downstream Jina embed + Qdrant call. At least 3 of the top 5 results match the dominant colour and garment type of the uploaded image. Zero Bedrock spend for the visual path.
 
 ---
 
@@ -1476,18 +1560,19 @@ raw → normalised → sentiment_scored → embedded → indexed
 
 A coordinator script (or simple cron) queries "what stage am I at?" for each catalogue and fires the next worker. New catalogue arrives → drop CSV → coordinator walks it through all four stages automatically.
 
-| Stage | Worker | Output |
-|---|---|---|
-| 1. Normalise | `workers/etl/pipeline.py` | Products written to `products` table with `embedding_status = 'pending'` |
-| 2. Score sentiment | `workers/sentiment/fashion_sentiment_worker.py` | `sentiment_scored_at` set, 8 sentiment columns populated |
-| 3. Embed | `workers/embedding_worker.py` | Vectors upserted to Qdrant, `embedding_status = 'embedded'` |
-| 4. Index attributes | `workers/etl/attribute_indexer.py` | Redis sets refreshed — constraint extractor picks up new values on next request |
+| Stage               | Worker                                            | Output                                                                           |
+| ------------------- | ------------------------------------------------- | -------------------------------------------------------------------------------- |
+| 1. Normalise        | `workers/etl/pipeline.py`                       | Products written to `products` table with `embedding_status = 'pending'`     |
+| 2. Score sentiment  | `workers/sentiment/fashion_sentiment_worker.py` | `sentiment_scored_at` set, 8 sentiment columns populated                       |
+| 3. Embed            | `workers/embedding_worker.py`                   | Vectors upserted to Qdrant,`embedding_status = 'embedded'`                     |
+| 4. Index attributes | `workers/etl/attribute_indexer.py`              | Redis sets refreshed — constraint extractor picks up new values on next request |
 
 The attribute indexer must run **last** and must be triggered automatically at the end of the embedding run. Right now it is manual. The embedding worker already marks rows `embedded` — the indexer should hook off that completion signal, either as a direct callback at the end of `run_worker()` or as a short-interval cron that fires when the embedding queue drains to zero.
 
 #### Adding a new catalogue
 
 Today, a new catalogue requires:
+
 1. Adding one `CatalogueConfig` object to `app/search/catalogue_config.py` (30 lines)
 2. Running the four-step chain above for that catalogue's data
 3. Calling `ensure_catalogue_indexes(collection_name, keyword_fields)` for the new Qdrant collection — already handled at startup by `app/main.py`

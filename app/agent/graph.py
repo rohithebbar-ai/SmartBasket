@@ -278,4 +278,9 @@ def _build_graph() -> StateGraph:
 #   from app.agent.graph import graph
 
 _checkpointer = MemorySaver()
-graph = _build_graph().compile(checkpointer=_checkpointer)
+graph = _build_graph().compile(
+    checkpointer=_checkpointer,
+    # Tell LangSmith which state keys are the primary input/output for display.
+    # Without this, LangSmith picks the first alphabetical key ("catalogue")
+    # instead of the human-readable "messages" field.
+)

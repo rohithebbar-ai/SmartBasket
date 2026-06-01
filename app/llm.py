@@ -171,6 +171,18 @@ def _call_mock(prompt: str, tier: str) -> str:
 
 # ── Public interface ──────────────────────────────────────────────────────────
 
+try:
+    from langsmith import traceable as _traceable
+    _HAS_LANGSMITH = True
+except ImportError:
+    _HAS_LANGSMITH = False
+    def _traceable(**_kw):  # type: ignore[misc]
+        def _noop(fn):
+            return fn
+        return _noop
+
+
+@_traceable(run_type="llm", name="call_llm")
 async def call_llm(
     prompt: str,
     tier: Literal["fast", "generation"] = "fast",
@@ -179,6 +191,7 @@ async def call_llm(
 ) -> str:
     """
     Single entry point for all LLM calls. Returns raw response text.
+    Decorated with @traceable so every call appears as a child LLM span in LangSmith.
 
     Args:
         prompt:      Full prompt string.

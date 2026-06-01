@@ -164,8 +164,10 @@ async def synthesise(state: ShopSenseState) -> dict:
 
     try:
         config = get_catalogue(state.get("catalogue") or "fashion")
+        store_name = config.display_name
         domain_tips = config.synthesis_domain_tips
     except Exception:
+        store_name = "ShopSense"
         domain_tips = ""
 
     prompt = SYNTHESIS_PROMPT.format(
@@ -177,6 +179,7 @@ async def synthesise(state: ShopSenseState) -> dict:
         budget_context=budget_context,
         user_preferences=json.dumps(user_preferences) if user_preferences else "none",
         domain_tips=domain_tips,
+        store_name=store_name,
     )
 
     review_nudge = await _build_review_nudge(state)

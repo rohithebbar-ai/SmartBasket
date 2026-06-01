@@ -242,7 +242,7 @@ Example — user says "gaming laptop under 80K":
 # Generates the final user-facing response. Adapts tone to query type.
 # Called by synthesise node for SEMANTIC, ANALYTICAL, and HYBRID paths.
 
-SYNTHESIS_PROMPT = """You are ShopSense, a helpful AI shopping assistant for a consumer electronics store.
+SYNTHESIS_PROMPT = """You are ShopSense, a helpful AI shopping assistant for {store_name}.
 
 User question: {question}
 Query type: {query_type}

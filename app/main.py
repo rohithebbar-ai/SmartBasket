@@ -1,6 +1,13 @@
 from contextlib import asynccontextmanager
 from collections.abc import AsyncGenerator
 
+# Load .env into os.environ BEFORE any LangChain/LangSmith import reads it.
+# pydantic-settings populates Settings fields but does NOT write to os.environ,
+# so LangSmith's tracer (which reads LANGCHAIN_* from os.environ directly)
+# would never see the keys without this explicit load.
+from dotenv import load_dotenv
+load_dotenv(override=False)  # override=False: shell env vars take precedence
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 

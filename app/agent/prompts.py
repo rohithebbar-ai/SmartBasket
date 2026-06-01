@@ -97,6 +97,11 @@ ADMIN_ACTION — user is asking for business analytics or inventory data
   "show me the revenue breakdown by brand this month"
   "which products have the lowest stock right now"
 
+VISUAL — user uploads an image and wants to find matching or similar products
+  "find something like this" (with image)
+  "show me items that match this outfit" (with image)
+  "I want this but in a different colour" (with image)
+
 OUT_OF_SCOPE — message is not related to shopping, products, or orders
   "what is the weather in Bangalore today"
   "tell me a joke"
@@ -106,6 +111,8 @@ Critical disambiguation rules:
 - PURCHASE_INTENT is for buying a specific OR referenced product. This INCLUDES vague references to search results: "I want to buy the first one", "add the cheapest one to cart", "get me the second option", "I'll take that one", "buy this for me". If products were shown in history and the user says "buy X" or "add X" where X references those results, use PURCHASE_INTENT.
 - CHECKOUT is for completing a transaction (user has already added items to cart).
 - If the message mentions an order number or delivery tracking, use ORDER_STATUS.
+- VISUAL requires an image attachment. A text-only message saying "show me something like this" with no prior image is PRODUCT_SEARCH, not VISUAL.
+- "what do you have in blue?" is PRODUCT_SEARCH (discovery), NOT ANALYTICAL.
 - Use conversation history only to understand references ("that one", "it", "the second option").
 - When genuinely ambiguous, prefer PRODUCT_SEARCH over OUT_OF_SCOPE.
 

@@ -113,12 +113,12 @@ FASHION_CATALOGUE = CatalogueConfig(
         "-- Price is stored in USD. Users may ask in ₹ — convert: ₹3000 ≈ $36"
     ),
     synthesis_domain_tips=(
-        "Casual → versatility for different settings, everyday comfort, care instructions\n"
-        "Office/Formal → fabric quality, fit precision, whether it suits meetings\n"
-        "Evening/Party → standout design feature, what to pair it with, occasion fit\n"
-        "Active/Sports → breathability, stretch, durability\n"
-        "Gifting → occasion relevance, size universality, style breadth\n"
-        "Always mention the occasion a piece suits best and one standout feature that justifies the recommendation."
+        "    Casual → versatility for different settings, everyday comfort, care instructions\n"
+        "    Office/Formal → fabric quality, fit precision, whether it suits meetings\n"
+        "    Evening/Party → standout design feature, what to pair it with, occasion fit\n"
+        "    Active/Sports → breathability, stretch, durability\n"
+        "    Gifting → occasion relevance, size universality, style breadth\n"
+        "    When recommending clothing, always mention the occasion it suits best and one standout feature."
     ),
 )
 
@@ -187,10 +187,10 @@ ELECTRONICS_CATALOGUE = CatalogueConfig(
         "-- Price is stored in USD. Users may ask in ₹ — divide by 83."
     ),
     synthesis_domain_tips=(
-        "AI/ML → VRAM, CUDA support, RAM ≥ 16 GB\n"
-        "Gaming → GPU tier, refresh rate, thermal headroom\n"
-        "Video editing → CPU core count, colour accuracy, storage speed\n"
-        "Travel → weight, battery life, build quality"
+        "    AI/ML → VRAM, CUDA support, RAM ≥ 16 GB\n"
+        "    Gaming → GPU tier, refresh rate, thermal headroom\n"
+        "    Video editing → CPU core count, colour accuracy, storage speed\n"
+        "    Travel → weight, battery life, build quality"
     ),
 )
 

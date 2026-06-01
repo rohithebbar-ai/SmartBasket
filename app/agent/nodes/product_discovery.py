@@ -136,6 +136,15 @@ async def semantic_search(state: ShopSenseState) -> dict:
         from app.search.constraint_extractor import _build_fallback
         constraints = _build_fallback(config, query)
 
+    # Wardrobe context: if the user is shopping for a specific occasion this session
+    # and the rewritten_query doesn't already mention it, enrich the embedding query
+    # so Qdrant surfaces complementary pieces for that context.
+    occasion_ctx = state.get("occasion_context") or ""
+    if occasion_ctx and occasion_ctx.lower() not in constraints.rewritten_query.lower():
+        constraints = constraints.model_copy(update={
+            "rewritten_query": f"{constraints.rewritten_query} {occasion_ctx}"
+        })
+
     # Step 2 — Embed rewritten query
     vector: list[float] = await asyncio.to_thread(embed, constraints.rewritten_query)
 

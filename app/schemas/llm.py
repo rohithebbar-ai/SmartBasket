@@ -36,6 +36,7 @@ class IntentOutput(BaseModel):
         "POST_PURCHASE",
         "WISHLIST_ACTION",
         "ADMIN_ACTION",
+        "VISUAL",
         "OUT_OF_SCOPE",
     ]
     reasoning: str

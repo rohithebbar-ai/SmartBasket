@@ -43,8 +43,8 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from app.agent.nodes.await_confirmation import await_confirmation
-from app.agent.nodes.classify_intent import classify_intent
-from app.agent.nodes.compare_products import compare_products
+from app.agent.nodes.supervisor import classify_intent
+from app.agent.nodes.comparison import compare_products
 from app.agent.nodes.execute_tool import execute_tool
 from app.agent.nodes.handle_checkout import handle_checkout
 from app.agent.nodes.handle_order_status import handle_order_status
@@ -52,17 +52,18 @@ from app.agent.nodes.handle_post_purchase import handle_post_purchase
 from app.agent.nodes.handle_purchase_intent import handle_purchase_intent
 from app.agent.nodes.hybrid_search import hybrid_search
 from app.agent.nodes.load_context import load_context
-from app.agent.nodes.nl_to_sql_search import nl_to_sql_search
+from app.agent.nodes.text2sql import nl_to_sql_search
 from app.agent.nodes.personalise import personalise
 from app.agent.nodes.price_intelligence import price_intelligence
-from app.agent.nodes.propose_tool_action import propose_tool_action
+from app.agent.nodes.propose_action import propose_tool_action
 from app.agent.nodes.recommend_alternatives import recommend_alternatives
 from app.agent.nodes.refuse import refuse
 from app.agent.nodes.route_query import route_query
 from app.agent.nodes.save_history import save_history
-from app.agent.nodes.semantic_search import semantic_search
+from app.agent.nodes.product_discovery import semantic_search
 from app.agent.nodes.summarize_reviews import summarize_reviews
 from app.agent.nodes.synthesise import synthesise
+from app.agent.nodes.visual_search import visual_search
 from app.agent.state import ShopSenseState
 
 # ── Remaining stubs (handle_wishlist, handle_admin — not yet implemented) ─────
@@ -89,6 +90,7 @@ def _route_intent(state: ShopSenseState) -> str:
         "post_purchase":    "handle_post_purchase",
         "wishlist_action":  "handle_wishlist",
         "admin_action":     "handle_admin",
+        "visual":           "visual_search",
         "out_of_scope":     "refuse",
     }
     return routes.get(intent, "refuse")
@@ -139,6 +141,7 @@ def _build_graph() -> StateGraph:
     builder.add_node("compare_products",        compare_products)
     builder.add_node("summarize_reviews",       summarize_reviews)
     builder.add_node("recommend_alternatives",  recommend_alternatives)
+    builder.add_node("visual_search",           visual_search)
 
     # ── Purchase intent + checkout + price intelligence nodes ─────────────────
     builder.add_node("handle_purchase_intent", handle_purchase_intent)
@@ -174,6 +177,7 @@ def _build_graph() -> StateGraph:
             "handle_post_purchase":   "handle_post_purchase",
             "handle_wishlist":        "handle_wishlist",
             "handle_admin":           "handle_admin",
+            "visual_search":          "visual_search",
             "refuse":                 "refuse",
         },
     )
@@ -237,6 +241,7 @@ def _build_graph() -> StateGraph:
     builder.add_edge("handle_wishlist",        "save_history")
     builder.add_edge("recommend_alternatives", "save_history")
     builder.add_edge("summarize_reviews",      "save_history")
+    builder.add_edge("visual_search",          "save_history")
 
     # ── Confirmation flow ─────────────────────────────────────────────────────
     # handle_post_purchase: review with rating → await_confirmation;

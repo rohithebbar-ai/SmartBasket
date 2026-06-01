@@ -294,7 +294,22 @@ class TestSemanticSearch:
 
 # ── Price filter ──────────────────────────────────────────────────────────────
 
+_NULL_CONSTRAINTS = None  # filled in via fixture below
+
+
 class TestPriceFilter:
+    @pytest.fixture(autouse=True)
+    def patch_extract_constraints(self):
+        from app.search.constraint_extractor import ConstraintOutput
+        null = ConstraintOutput(
+            rewritten_query="laptop",
+            max_price=None, min_price=None,
+            hard_filters={}, soft_attrs={},
+            detected_currency="USD", occasion=None,
+        )
+        with patch("app.search.router.extract_constraints", new_callable=AsyncMock, return_value=null):
+            yield
+
     def test_max_price_filter_is_passed_to_qdrant(self, client: TestClient):
         with (
             patch("app.search.router.classify_query", return_value=_semantic_routing()),

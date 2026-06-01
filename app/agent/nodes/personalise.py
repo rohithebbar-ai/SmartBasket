@@ -26,11 +26,20 @@ from app.agent.state import ShopSenseState
 
 log = logging.getLogger(__name__)
 
-_BRAND_BOOST    = 0.15
-_CATEGORY_BOOST = 0.03
+_BRAND_BOOST     = 0.15
+_CATEGORY_BOOST  = 0.03
 _PRICE_FIT_BOOST = 0.05
-_FEATURE_BOOST  = 0.03
+_FEATURE_BOOST   = 0.03
+_COLOUR_BOOST    = 0.08   # fashion: preferred colour match in attributes
+_OCCASION_BOOST  = 0.10   # fashion: occasion matches session occasion_context
+_COMFORT_BOOST   = 0.06   # fashion: high comfort_sentiment when comfort_priority set
 _SENTIMENT_THRESHOLD = 4.0
+
+
+def _get_product_colour(r: dict) -> str:
+    """Extract normalised colour from product attributes dict."""
+    attrs = r.get("attributes") or {}
+    return str(attrs.get("colour") or "").lower()
 
 
 async def personalise(state: ShopSenseState) -> dict:
@@ -44,6 +53,13 @@ async def personalise(state: ShopSenseState) -> dict:
     preferred_categories = {c.lower() for c in (prefs.get("preferred_categories") or [])}
     price_min = prefs.get("typical_price_min")
     price_max = prefs.get("typical_price_max")
+
+    # Fashion-specific preference signals
+    preferred_colours = {c.lower() for c in (prefs.get("preferred_colours") or [])}
+    preferred_occasions = {o.lower() for o in (prefs.get("preferred_occasions") or [])}
+    comfort_priority: bool = bool(prefs.get("comfort_priority"))
+    # occasion_context carries what the user is shopping for this session
+    session_occasion = (state.get("occasion_context") or "").lower()
 
     # feature_priorities is a dict {feature_name: weight} or a list [feature_name, ...]
     raw_priorities = prefs.get("feature_priorities") or {}
@@ -68,8 +84,30 @@ async def personalise(state: ShopSenseState) -> dict:
             if price_min <= price <= price_max:
                 boost += _PRICE_FIT_BOOST
 
-        if feature_names:
+        # Fashion: preferred colour match
+        if preferred_colours:
+            product_colour = _get_product_colour(r)
+            if product_colour and any(c in product_colour for c in preferred_colours):
+                boost += _COLOUR_BOOST
+
+        # Fashion: occasion match — both stored prefs and the current session occasion
+        attrs = r.get("attributes") or {}
+        product_occasion = str(attrs.get("occasion") or "").lower()
+        if product_occasion:
+            if preferred_occasions and any(o in product_occasion for o in preferred_occasions):
+                boost += _OCCASION_BOOST
+            elif session_occasion and session_occasion in product_occasion:
+                boost += _OCCASION_BOOST
+
+        # Fashion: comfort priority — boost high-comfort-sentiment products
+        if comfort_priority:
             sentiment_scores: dict = r.get("sentiment_scores") or {}
+            if sentiment_scores.get("comfort_sentiment", 0.0) >= _SENTIMENT_THRESHOLD:
+                boost += _COMFORT_BOOST
+
+        # Electronics / generic: feature sentiment boosts
+        if feature_names:
+            sentiment_scores = r.get("sentiment_scores") or {}
             for feature in feature_names:
                 score = sentiment_scores.get(f"{feature}_sentiment", 0.0)
                 if score >= _SENTIMENT_THRESHOLD:

@@ -1,57 +1,27 @@
-version: "3.9"
-
 # Production overrides. Used on EC2 only.
 # Usage: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+# Postgres → Supabase cloud. Qdrant → Qdrant Cloud. Only Redis + Kafka run locally.
 
 services:
-  postgres:
-    restart: always
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: ${POSTGRES_DB}
-    ports: []  # Not exposed to host in production — app connects over internal network
-
   redis:
     restart: always
-    ports: []
-
-  qdrant:
-    restart: always
-    ports: []
-
-  zookeeper:
-    restart: always
+    ports: []  # Not exposed to host — app connects over internal network
 
   kafka:
     restart: always
     environment:
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_INTERNAL://kafka:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,PLAINTEXT_INT://kafka:29092
 
   kafka-ui:
     restart: always
-    ports: []  # Kafka UI not exposed in production — access via SSH tunnel if needed
+    ports: []  # Access via SSH tunnel: ssh -L 8080:localhost:8080 ec2-user@<host>
 
-  app:
-    image: shopsense:latest
+  clip-service:
     restart: always
-    ports:
-      - "8000:8000"
-    env_file:
-      - .env
-    depends_on:
-      - postgres
-      - redis
-      - qdrant
-      - kafka
+    ports: []  # Internal only — app calls http://clip-service:8001
 
-  workers:
-    image: shopsense:latest
+  personalisation-worker:
     restart: always
-    command: python workers/run_workers.py
-    env_file:
-      - .env
-    depends_on:
-      - postgres
-      - redis
-      - kafka
+
+  post-purchase-worker:
+    restart: always

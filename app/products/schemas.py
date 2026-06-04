@@ -77,7 +77,24 @@ class ProductResponse(BaseModel):
     avg_rating: float
     is_active: bool
     created_at: datetime
-    # Sentiment scores — None until run_sentiment.py populates them
+
+    # Fashion fields (migration 017)
+    external_product_id: str | None = None
+    description:         str | None = None
+    image_url:           str | None = None
+    attributes:          dict       = {}
+    embedding_status:    str        = "pending"
+    last_ingested_at:    datetime | None = None
+
+    # Fashion sentiment — None until sentiment worker runs
+    style_sentiment:       float | None = None
+    quality_sentiment:     float | None = None
+    fit_sentiment:         float | None = None
+    comfort_sentiment:     float | None = None
+    versatility_sentiment: float | None = None
+    delivery_sentiment:    float | None = None
+
+    # Electronics sentiment — None until run_sentiment.py populates them
     battery_sentiment:       float | None = None
     display_sentiment:       float | None = None
     build_quality_sentiment: float | None = None

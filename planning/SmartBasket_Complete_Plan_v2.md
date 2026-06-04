@@ -1419,73 +1419,164 @@ Instead we use CLIP for **zero-shot classification**:
 
 CLIP handles image→attributes. Jina handles attributes→Qdrant. They never compare vectors with each other.
 
-#### Deployment architecture: separate Docker container, same EC2
+#### Deployment architecture: Hugging Face Spaces (prod) + Docker (local dev)
 
-**Do not** add CLIP/PyTorch to the main FastAPI container. PyTorch alone is ~2GB in a Docker image and would bloat the main app image and increase EC2 memory pressure.
+> **Decision (2026-06-01):** Instead of running CLIP on the same EC2 instance (which would require upgrading to t3.large, +$25/mo), deploy the CLIP service to **Hugging Face Spaces free tier** and call it as an external microservice. This keeps EC2 at t3.medium, eliminates the EC2 memory pressure from PyTorch, and demonstrates a real multi-platform microservice architecture. Cold start (~20-30s after 15min inactivity) is acceptable for visual search, which is not on the real-time chat path.
 
+**Local dev:**
 ```
-EC2 t3.large (8GB RAM)
+docker-compose
+├── app           (FastAPI :8000, no torch)
+├── clip-service  (FastAPI :8001, open-clip-torch — local only)
+└── redis
+```
+`CLIP_SERVICE_URL=http://clip-service:8001` in local `.env`.
+
+**Production:**
+```
+EC2 t3.medium (4GB, ~$35/mo — unchanged)
 └── docker-compose
-    ├── app           (FastAPI, ~1.5GB RAM, lean image, no torch)
-    ├── clip-service  (FastAPI :8001, ~800MB RAM, owns torch + open-clip-torch)
-    ├── redis         (~200MB)
-    └── postgres / Supabase
+    ├── app    (FastAPI :8000)
+    └── redis
+
+Hugging Face Spaces (free tier, 16GB RAM)
+└── clip-service  (FastAPI :7860, open-clip-torch)
+```
+`CLIP_SERVICE_URL=https://<username>-clip-service.hf.space` in prod `.env`.
+
+**Security:** HF Spaces free tier cannot be made truly private. Protect with a shared secret in the `X-API-Key` header. The main app sends the key on every request; the CLIP service rejects calls without it. Store as `CLIP_SERVICE_API_KEY` in both `.env` files. End users never see the HF Spaces URL — it is an internal backend-to-backend call only.
+
+**Why HF Spaces over Render/Railway free tiers:**
+- Render free tier: only 512MB RAM — CLIP needs 600-800MB, will OOM crash
+- Railway: no longer has a free tier (requires $5/month hobby plan)
+- HF Spaces: 16GB RAM, genuinely free, purpose-built for ML workloads
+
+**Cold start behaviour:** HF Spaces spins down after ~15 minutes of inactivity. Cold start is ~20-30s (model load). For the demo this is fine — visual search is a secondary path. Keep-alive ping (optional): a background cron in the main app can hit `/health` every 10 minutes to keep the space warm during demo hours.
+
+**CLIP service is stateless — no Redis dependency on HF Spaces.** The main app fetches attribute candidates from its own Redis and sends them with the image in each request:
+
+```json
+POST /classify
+{
+  "image_b64": "...",
+  "candidates": {
+    "colour":   ["Black", "White", "Red", ...],
+    "pattern":  ["Solid", "Floral", "Striped", ...],
+    "category": ["Dresses", "Tops", "Trousers", ...]
+  }
+}
+→ {"top": {"colour": "Black", "pattern": "Solid", "category": "Dresses"},
+   "scores": {"colour": {"Black": 0.72, "White": 0.15, ...}, ...}}
 ```
 
-The main app calls `http://clip-service:8001/classify` over Docker's internal network (~1ms overhead). If the CLIP service is down, `visual_search` node returns the graceful stub — rest of the app is unaffected.
+This means the CLIP service has no knowledge of catalogues, Redis, or the main app's config — it is a pure image classification microservice. The main app owns all business logic. This design also makes it easy to swap CLIP for a different model later without touching the main app.
 
-**EC2 sizing:** t3.medium (4GB) is tight with CLIP added. Move to **t3.large (8GB, ~$60/mo)** when deploying Day 22.
+**HF Spaces deployment files (create `deploy/hf_spaces/clip/`):**
+
+`README.md` (required by HF Spaces — contains YAML metadata):
+```yaml
+---
+title: CLIP Visual Search Service
+emoji: 👗
+colorFrom: blue
+colorTo: purple
+sdk: docker
+pinned: false
+---
+```
+
+`Dockerfile`:
+```dockerfile
+FROM python:3.11-slim
+WORKDIR /app
+# CPU-only torch — ~800MB vs 2.5GB GPU build
+RUN pip install --no-cache-dir \
+    torch==2.1.0 --index-url https://download.pytorch.org/whl/cpu \
+    open-clip-torch==2.24.0 \
+    fastapi==0.115.0 \
+    "uvicorn[standard]==0.30.6" \
+    pillow==10.4.0
+COPY app.py .
+EXPOSE 7860
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "7860"]
+```
+
+`app.py` (logic — see Step 2 in build order below).
+
+**EC2 sizing:** Keep t3.medium. No upgrade needed.
 
 #### Build order
 
-**Step 1 — `Dockerfile.clip`**
+**Step 1 — `deploy/hf_spaces/clip/app.py`** (the CLIP FastAPI service)
+- Startup: load `ViT-B/32` (CPU), no Redis — stateless
+- `POST /classify`: accepts `{"image_b64": "...", "candidates": {"colour": [...], ...}}`
+  - Decode image → CLIP image embed
+  - For each attribute: CLIP text-encode candidate labels, cosine similarity, pick top label
+  - Confidence threshold: if top score < 0.20 → set that attribute to `null` (don't force a bad filter)
+  - Return `{"top": {...}, "scores": {...}}`
+- `GET /health`: returns `{"status": "ok", "model": "ViT-B-32"}`
+- Auth: check `X-API-Key` header against `CLIP_SERVICE_API_KEY` env var; 401 if mismatch
+
+**Step 2 — `deploy/hf_spaces/clip/Dockerfile` + `README.md`** (see templates above)
+
+**Step 3 — `deploy/hf_spaces/clip/Dockerfile.local`** — same but port 8001 for docker-compose local dev:
 ```dockerfile
-FROM python:3.11-slim
-RUN pip install open-clip-torch fastapi uvicorn redis aioredis
-# open-clip-torch is lighter than full transformers+torch (~1.2GB vs ~2.5GB)
-COPY workers/clip_service.py .
-CMD ["uvicorn", "clip_service:app", "--host", "0.0.0.0", "--port", "8001"]
+# identical to HF Dockerfile but EXPOSE 8001 and port in CMD
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8001"]
 ```
 
-**Step 2 — `workers/clip_service.py`** (standalone FastAPI service)
-- On startup: load `ViT-B/32`, read Redis attribute sets, CLIP-encode all values, cache in memory
-- `POST /classify` accepts `{"image_b64": "..."}`, returns `{"colour": "Black", "pattern": "Solid", "category": "Dresses", "scores": {...}}`
-- Confidence threshold: if top score < 0.20, set attribute to `null` (don't force a bad filter)
-- `/health` endpoint for docker-compose healthcheck
+**Step 4 — `docker-compose.yml`** — add local `clip-service` block (no Redis dep — stateless):
+```yaml
+clip-service:
+  build:
+    context: deploy/hf_spaces/clip
+    dockerfile: Dockerfile.local
+  ports: ["8001:8001"]
+  environment:
+    - CLIP_SERVICE_API_KEY=${CLIP_SERVICE_API_KEY}
+```
 
-**Step 3 — `docker-compose.yml`** — add `clip-service` block with `depends_on: [redis]`
-
-**Step 4 — `app/agent/nodes/visual_search.py`** (replace current stub)
+**Step 5 — `app/agent/nodes/visual_search.py`** (replace stub)
 - Read `state.visual_attributes["image_b64"]`
-- POST to `http://clip-service:8001/classify`
-- Build `rewritten_query` from non-null attributes
-- Call `extract_constraints()` with the rewritten query + config to get hard filters
-- Proceed to normal semantic search path (reuse `semantic_search` logic)
+- Fetch attribute candidates from Redis using `config.filterable_attrs` (same pattern as `extract_constraints`)
+- POST to `settings.clip_service_url + "/classify"` with image + candidates + `X-API-Key` header
+- Build `rewritten_query` from non-null top attributes (e.g. `"Black Solid Dresses"`)
+- Store CLIP results in `state.visual_attributes` (for synthesis to reference)
+- Run the normal semantic search path from here
 
-**Step 5 — `app/agent/router.py`** — update `POST /chat` to accept `multipart/form-data` with optional image; base64-encode and store in `state.visual_attributes`
+**Step 6 — `app/agent/router.py`** — add `image_b64: str = Field(default="")` to `ChatRequest`; if non-empty, set `state.visual_attributes = {"image_b64": image_b64}` in initial state
 
-**Step 6 — `app/agent/nodes/supervisor.py`** — detect `state.visual_attributes` non-empty → override intent to VISUAL regardless of message text ("find something like this", vague references)
+**Step 7 — `app/agent/nodes/supervisor.py`** — before LLM call: if `state.visual_attributes.get("image_b64")` is non-empty → return `{"intent": "VISUAL"}` immediately (no LLM needed)
 
-**Step 7 — synthesis prompt** — for VISUAL query_type, mention which visual attributes were detected ("Found items matching your uploaded image: Black, Solid, Dresses")
+**Step 8 — `.env` additions:**
+```
+CLIP_SERVICE_URL=http://clip-service:8001   # local
+# CLIP_SERVICE_URL=https://<hf-username>-clip-service.hf.space  # prod
+CLIP_SERVICE_API_KEY=<random 32-char secret, same in both places>
+```
 
-#### Latency breakdown (CPU, t3.large)
+**Step 9 — HF Spaces deploy:** Create new Space at huggingface.co → Docker SDK → push `deploy/hf_spaces/clip/` contents → set `CLIP_SERVICE_API_KEY` in Space secrets → update prod `.env` with the Space URL.
 
-| Step | Time |
-|------|------|
-| CLIP image encode (one forward pass) | ~50ms |
-| cosine similarity over cached text vecs | ~5ms |
-| HTTP to clip-service (internal Docker) | ~1ms |
-| Jina text embed (existing path) | ~80ms |
-| Qdrant search | ~30ms |
-| **Total visual search** | **~170ms** |
+#### Latency breakdown
 
-Compare to original Bedrock Sonnet vision path: ~1000–1500ms. CLIP is ~8x faster.
+| Step | Local Docker | HF Spaces (prod, warm) |
+|------|-------------|------------------------|
+| HTTP to CLIP service | ~1ms | ~80-120ms |
+| CLIP image encode | ~50ms | ~50ms |
+| cosine similarity | ~5ms | ~5ms |
+| Jina text embed (existing) | ~80ms | ~80ms |
+| Qdrant search | ~30ms | ~30ms |
+| **Total visual search** | **~170ms** | **~250-290ms** |
+
+Compare to original Bedrock Sonnet vision path: ~1000–1500ms. Even the HF Spaces path is **4-5x faster**.
+
+Cold-start path (HF Space spun down): +20-30s on first request after inactivity. Subsequent requests are warm. Optional: main app health-pings the space every 10 min during demo hours.
 
 #### Cost
 
-- CLIP inference: **$0** (local)
+- CLIP inference: **$0** (HF Spaces free tier)
 - Per visual search request: **$0 Bedrock spend**
-- EC2 cost increase: ~$30/mo (t3.medium → t3.large)
+- EC2: stays at t3.medium, **no upgrade needed** (~$25/mo saved vs t3.large)
 
 #### Synthesis model — switch to Haiku across all paths
 

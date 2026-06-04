@@ -151,6 +151,12 @@ class Settings(BaseSettings):
     pricing_max_multiplier: float = Field(default=1.30, gt=1.0, le=2.0)
     pricing_min_multiplier: float = Field(default=0.80, gt=0.0, lt=1.0)
 
+    # ── CLIP Visual Search Microservice ──────────────────────────────────────
+    # Local dev: http://clip-service:8001  (docker-compose internal network)
+    # Production: https://<hf-username>-clip-service.hf.space  (HF Spaces)
+    clip_service_url: str = "http://clip-service:8001"
+    clip_service_api_key: str = ""  # shared secret; set in both .env and HF Space secrets
+
     # ── Data Ingestion ────────────────────────────────────────────────────────
     bestbuy_api_key: str | None = None
 

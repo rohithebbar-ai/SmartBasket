@@ -39,7 +39,6 @@ LangSmith tracing activates automatically when LANGCHAIN_TRACING_V2=true
 is set in the environment — no code changes needed.
 """
 
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from app.agent.nodes.await_confirmation import await_confirmation
@@ -241,7 +240,13 @@ def _build_graph() -> StateGraph:
     builder.add_edge("handle_wishlist",        "save_history")
     builder.add_edge("recommend_alternatives", "save_history")
     builder.add_edge("summarize_reviews",      "save_history")
-    builder.add_edge("visual_search",          "save_history")
+    # visual_search: success path (search_results set) → personalise → synthesise
+    # error/stub path (final_response already set, no results) → save_history directly
+    builder.add_conditional_edges(
+        "visual_search",
+        lambda s: "personalise" if s.get("search_results") else "save_history",
+        {"personalise": "personalise", "save_history": "save_history"},
+    )
 
     # ── Confirmation flow ─────────────────────────────────────────────────────
     # handle_post_purchase: review with rating → await_confirmation;
@@ -276,11 +281,11 @@ def _build_graph() -> StateGraph:
 # ── Compiled graph (module-level singleton) ───────────────────────────────────
 # Import this in app/agent/router.py:
 #   from app.agent.graph import graph
+#
+# Checkpointer: MemorySaver for local dev (simple, no setup needed).
+# For production, wire AsyncRedisSaver inside the FastAPI lifespan and recompile,
+# or use langgraph-checkpoint-redis with a proper async context manager.
+from langgraph.checkpoint.memory import MemorySaver as _MemorySaver
 
-_checkpointer = MemorySaver()
-graph = _build_graph().compile(
-    checkpointer=_checkpointer,
-    # Tell LangSmith which state keys are the primary input/output for display.
-    # Without this, LangSmith picks the first alphabetical key ("catalogue")
-    # instead of the human-readable "messages" field.
-)
+checkpointer = _MemorySaver()
+graph = _build_graph().compile(checkpointer=checkpointer)

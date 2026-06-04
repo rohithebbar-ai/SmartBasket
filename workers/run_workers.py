@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 
 async def main() -> None:
     from workers.personalisation_worker import start as run_personalisation_worker
-    from workers.post_purchase_worker import run_post_purchase_worker
+    from workers.scheduled_agents.post_purchase import run_post_purchase_worker
 
     log.info("Starting worker process")
     try:

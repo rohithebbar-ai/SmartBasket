@@ -1,0 +1,15 @@
+FROM python:3.11-slim
+WORKDIR /app
+# Install torch CPU-only first (separate step so pip resolves correct platform wheel),
+# then open-clip-torch (unpinned — lets pip pick a wheel compatible with installed torch).
+# torch + torchvision must be installed together from the same index to avoid
+# operator version mismatches (open-clip-torch pulls in torchvision as a dep).
+RUN pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu
+RUN pip install --no-cache-dir \
+    "open-clip-torch" \
+    "fastapi==0.115.0" \
+    "uvicorn[standard]==0.30.6" \
+    "pillow==10.4.0"
+COPY app.py .
+EXPOSE 8001
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8001"]

@@ -22,11 +22,16 @@ class ProductResult(BaseModel):
     category: str
     current_price: float
     avg_rating: float
-    relevance_score: float = 0.0   # Cosine similarity or reranker score
+    relevance_score: float = 0.0
     stock_available: bool = True
-    specs: dict = Field(default_factory=dict)
-    sentiment_scores: dict = Field(default_factory=dict)   # battery, display, etc.
+    image_url: str | None = None
+    description: str = ""
+    attributes: dict = Field(default_factory=dict)   # colour, pattern, garment_group, etc.
+    sentiment_scores: dict = Field(default_factory=dict)
+    top_praise: str | None = None
+    top_complaint: str | None = None
     use_cases: list[str] = Field(default_factory=list)
+    specs: dict = Field(default_factory=dict)        # legacy — kept for backwards compat
 
 
 class SearchResponse(BaseModel):

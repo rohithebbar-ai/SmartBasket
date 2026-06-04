@@ -42,6 +42,10 @@ async def classify_intent(state: ShopSenseState) -> dict:
         log.warning("classify_intent called with empty messages — defaulting to %s", _DEFAULT_INTENT)
         return {"intent": _DEFAULT_INTENT}
 
+    # If image was uploaded, force VISUAL intent — no LLM needed
+    if state.get("visual_attributes", {}).get("image_b64"):
+        return {"intent": "VISUAL"}
+
     current_message = messages[-1].get("content", "")
     history = _format_history(messages, exclude_last=1)
 

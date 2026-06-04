@@ -28,6 +28,11 @@ from app.search.qdrant_ops import ensure_catalogue_indexes
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    # startup — initialise LangGraph Redis checkpointer (creates indexes on first run)
+    from app.agent.graph import checkpointer as _graph_checkpointer
+    if hasattr(_graph_checkpointer, "asetup"):
+        await _graph_checkpointer.asetup()
+
     # startup — ensure Qdrant payload indexes for all known catalogues
     for catalogue in (FASHION_CATALOGUE, ELECTRONICS_CATALOGUE):
         keyword_fields = [

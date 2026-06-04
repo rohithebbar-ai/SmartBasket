@@ -1,12 +1,8 @@
 # Automatically merged by Docker Compose during local development.
-# Adds: hot-reload volume mounts, debug port exposure, isolated test database.
+# Adds: verbose logging, isolated test database.
 # Never used in production — copy docker-compose.prod.yml to EC2 instead.
 
 services:
-  postgres:
-    environment:
-      POSTGRES_PASSWORD: shopsense  # Weak password fine for local only
-
   redis:
     command: redis-server --loglevel verbose
 
@@ -14,8 +10,8 @@ services:
     environment:
       KAFKA_LOG4J_LOGGERS: "kafka=WARN,kafka.controller=WARN"
 
-  # Isolated test database — runs on port 5433 so it never conflicts with dev DB.
-  # Uses tmpfs (in-memory) for speed; data is lost on container restart by design.
+  # Isolated test database — in-memory postgres for pytest only (port 5433).
+  # Uses tmpfs for speed; data is lost on container restart by design.
   postgres_test:
     image: postgres:15-alpine
     environment:

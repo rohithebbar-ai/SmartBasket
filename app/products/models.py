@@ -39,9 +39,25 @@ class Product(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
-    # lazy="noload" — never fetched implicitly. Service layer uses selectinload()
-    # explicitly when reviews are needed, keeping list queries fast.
-    # Aspect sentiment scores — NULL until run_sentiment.py (data/ingestion) populates them.
+    # ── Fashion / H&M columns (migration 017) ────────────────────────────────
+    external_product_id: Mapped[str | None]  = mapped_column(String, unique=True, index=True)
+    description:         Mapped[str | None]  = mapped_column(Text)
+    image_url:           Mapped[str | None]  = mapped_column(Text)
+    attributes:          Mapped[dict]        = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    embedding_status:    Mapped[str]         = mapped_column(String, nullable=False, default="pending")
+    last_ingested_at:    Mapped[datetime | None] = mapped_column()
+
+    # Fashion sentiment (migration 017) — NULL until sentiment worker runs
+    style_sentiment:       Mapped[float | None] = mapped_column(Float)
+    quality_sentiment:     Mapped[float | None] = mapped_column(Float)
+    fit_sentiment:         Mapped[float | None] = mapped_column(Float)
+    comfort_sentiment:     Mapped[float | None] = mapped_column(Float)
+    versatility_sentiment: Mapped[float | None] = mapped_column(Float)
+    delivery_sentiment:    Mapped[float | None] = mapped_column(Float)
+
+    # Electronics sentiment (migration 013) — NULL for fashion products
     battery_sentiment:       Mapped[float | None] = mapped_column(Float)
     display_sentiment:       Mapped[float | None] = mapped_column(Float)
     build_quality_sentiment: Mapped[float | None] = mapped_column(Float)

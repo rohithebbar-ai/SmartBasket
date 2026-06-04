@@ -1,23 +1,4 @@
 services:
-  postgres:
-    image: postgres:15-alpine
-    environment:
-      POSTGRES_USER: shopsense
-      POSTGRES_PASSWORD: shopsense
-      POSTGRES_DB: shopsense
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-      # Migrations run once on first startup (empty volume only).
-      # Files execute in alphabetical order — timestamp prefix ensures correct sequence.
-      - ./supabase/migrations:/docker-entrypoint-initdb.d:ro
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U shopsense -d shopsense"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-
   redis:
     image: redis:7-alpine
     ports:
@@ -30,18 +11,25 @@ services:
       timeout: 5s
       retries: 5
 
-  qdrant:
-    image: qdrant/qdrant:latest
+  clip-service:
+    build:
+      context: deploy/hf_spaces/clip
+      dockerfile: Dockerfile.local
     ports:
-      - "6335:6333"
-      - "6336:6334"
+      - "8001:8001"
+    environment:
+      - CLIP_SERVICE_API_KEY=${CLIP_SERVICE_API_KEY:-}
+      # Mount HuggingFace cache so ViT-B-32 weights (~350MB) are downloaded once
+      # and reused on every restart instead of re-downloading each time.
+      - HF_HOME=/cache/huggingface
     volumes:
-      - qdrant_data:/qdrant/storage
+      - clip_model_cache:/cache
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:6333/collections || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      test: ["CMD-SHELL", "curl -f http://localhost:8001/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
 
   # KRaft mode — no ZooKeeper needed.
   # The broker acts as both broker and controller (combined mode, fine for dev).
@@ -114,14 +102,13 @@ services:
   # ── Background worker processes ───────────────────────────────────────────────
   # Both run in their own containers, separate from the FastAPI web process, so
   # they never block HTTP request handling.
+  # Postgres is on Supabase (cloud) — no local postgres dependency.
 
   personalisation-worker:
     build: .
     command: python -m workers.run_workers
     env_file: .env
     depends_on:
-      postgres:
-        condition: service_healthy
       redis:
         condition: service_healthy
       kafka:
@@ -135,12 +122,10 @@ services:
     command: >
       python -c "
       import asyncio;
-      from workers.post_purchase_worker import run_post_purchase_worker;
+      from workers.scheduled_agents.post_purchase import run_post_purchase_worker;
       asyncio.run(run_post_purchase_worker())"
     env_file: .env
     depends_on:
-      postgres:
-        condition: service_healthy
       redis:
         condition: service_healthy
       kafka:
@@ -150,7 +135,6 @@ services:
     restart: on-failure
 
 volumes:
-  postgres_data:
   redis_data:
-  qdrant_data:
   kafka_data:
+  clip_model_cache:  # persists ViT-B-32 weights across container restarts

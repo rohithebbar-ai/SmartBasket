@@ -12,7 +12,7 @@ so from the agent's perspective the interface is identical to a remote server.
 
 from fastapi import APIRouter
 
-from app.mcp.tools.cart_tools import router as cart_router
+from app.mcp.tools.checkout import router as cart_router
 from app.mcp.tools.notification_tools import router as notification_router
 from app.mcp.tools.payment_tools import router as payment_router
 

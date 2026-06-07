@@ -2,25 +2,18 @@
 compare_products — COMPARE intent path.
 
 Steps:
-  1. Use Bedrock Haiku to extract 2-3 product names from the user message.
+  1. Extract 2-3 product names from the user message via LLM (fast tier).
   2. For each name, embed and search Qdrant (top-1) to find the closest match.
-  3. Enrich each Qdrant match with a PostgreSQL fetch:
-       - Fresh current_price and stock_count (pricing engine updates these)
-       - Aggregated sentiment averages from all reviews for that product
+  3. Enrich each Qdrant match from PostgreSQL:
+       - Fresh current_price, stock_count, description
+       - JSONB attributes: colour, pattern, garment_group, section
+       - Aggregated fashion sentiment averages (style, quality, fit, comfort, versatility)
      Falls back to the Qdrant result as-is if the DB fetch fails.
-  4. Sets state.query_type = "COMPARE" so synthesise formats a side-by-side comparison.
-  5. Falls back to a broad semantic search on the full query if product
-     extraction fails or returns nothing.
+  4. Writes state.query_type = "COMPARE" so synthesise uses COMPARISON_SYNTHESIS_PROMPT.
+  5. Falls back to broad semantic search when extraction fails or finds nothing.
 
-DB query uses AVG() over reviews joined per product — not LIMIT 1, which
-would grab one random review's scores rather than the aggregated average.
-Only the 5 sentiment columns that exist in the reviews table are fetched:
-  battery, display, build_quality, value, performance.
-
-Reads:  state.messages (last user message)
-Writes: state.search_results (list[dict] — up to 3 enriched ProductResult dicts)
-        state.sources (list[str] — product_id strings)
-        state.query_type ("COMPARE")
+Reads:  state.messages (last user message), state.catalogue
+Writes: state.search_results, state.sources, state.query_type ("COMPARE")
 
 Outgoing edge: → synthesise (bypasses personalise — deterministic fetch)
 """
@@ -31,7 +24,7 @@ import logging
 
 from sqlalchemy import text
 
-from app.agent.prompts import COMPARE_EXTRACTION_PROMPT
+from app.agent.prompts import COMPARE_EXTRACTION_PROMPT, OCCASION_EXTRACTION_PROMPT
 from app.agent.state import ShopSenseState
 from app.database import AsyncSessionLocal
 from app.llm import call_llm
@@ -41,8 +34,8 @@ from app.search.qdrant_ops import search
 
 log = logging.getLogger(__name__)
 
-# Fetches fresh price/stock from products and aggregated sentiment from reviews.
-# Only columns that exist in the reviews table are selected.
+# Fetches fresh price/stock, JSONB attributes, and aggregated fashion sentiment.
+# Sentiment columns are averaged across all reviews — not LIMIT 1 (would grab one random row).
 _ENRICH_SQL = text("""
     SELECT
         p.id,
@@ -52,17 +45,17 @@ _ENRICH_SQL = text("""
         CAST(p.current_price AS FLOAT)       AS current_price,
         p.avg_rating,
         p.stock_count,
-        p.specs,
-        AVG(r.battery_sentiment)             AS battery_sentiment,
-        AVG(r.display_sentiment)             AS display_sentiment,
-        AVG(r.build_quality_sentiment)       AS build_quality_sentiment,
-        AVG(r.value_sentiment)               AS value_sentiment,
-        AVG(r.performance_sentiment)         AS performance_sentiment
+        p.description,
+        p.attributes,
+        AVG(p.style_sentiment)               AS style_sentiment,
+        AVG(p.quality_sentiment)             AS quality_sentiment,
+        AVG(p.fit_sentiment)                 AS fit_sentiment,
+        AVG(p.comfort_sentiment)             AS comfort_sentiment,
+        AVG(p.versatility_sentiment)         AS versatility_sentiment
     FROM products p
-    LEFT JOIN reviews r ON r.product_id = p.id
     WHERE p.id = :product_id
     GROUP BY p.id, p.name, p.brand, p.category, p.current_price,
-             p.avg_rating, p.stock_count, p.specs
+             p.avg_rating, p.stock_count, p.description, p.attributes
 """)
 
 
@@ -89,24 +82,27 @@ async def _enrich_from_db(product_id: str, qdrant_result: ProductResult) -> Prod
         if row is None:
             return qdrant_result
 
+        _SENTIMENT_COLS = (
+            "style_sentiment", "quality_sentiment", "fit_sentiment",
+            "comfort_sentiment", "versatility_sentiment",
+        )
         sentiment_scores = {
-            k: float(row[k])
-            for k in (
-                "battery_sentiment", "display_sentiment", "build_quality_sentiment",
-                "value_sentiment", "performance_sentiment",
-            )
+            k: round(float(row[k]), 2)
+            for k in _SENTIMENT_COLS
             if row[k] is not None
         }
 
-        specs: dict = {}
-        if row["specs"]:
-            if isinstance(row["specs"], str):
-                try:
-                    specs = json.loads(row["specs"])
-                except json.JSONDecodeError:
-                    specs = {}
-            elif isinstance(row["specs"], dict):
-                specs = row["specs"]
+        # attributes JSONB → colour, pattern, garment_group, section, department
+        raw_attrs = row["attributes"]
+        if isinstance(raw_attrs, str):
+            try:
+                attrs: dict = json.loads(raw_attrs)
+            except json.JSONDecodeError:
+                attrs = {}
+        elif isinstance(raw_attrs, dict):
+            attrs = raw_attrs
+        else:
+            attrs = {}
 
         return ProductResult(
             product_id=product_id,
@@ -117,9 +113,10 @@ async def _enrich_from_db(product_id: str, qdrant_result: ProductResult) -> Prod
             avg_rating=float(row["avg_rating"]),
             relevance_score=qdrant_result.relevance_score,
             stock_available=int(row["stock_count"]) > 0,
-            specs=specs,
+            description=row["description"] or "",
+            attributes=attrs,
             sentiment_scores=sentiment_scores,
-            use_cases=qdrant_result.use_cases,  # Qdrant payload has use_cases; DB does not
+            use_cases=qdrant_result.use_cases,
         )
     except Exception as exc:
         log.warning("DB enrichment failed for product %s (%s) — using Qdrant result", product_id, exc)
@@ -178,8 +175,22 @@ async def compare_products(state: ShopSenseState) -> dict:
         except Exception as exc:
             log.error("compare_products fallback search failed: %s", exc)
 
+    # Extract occasion/use-case from the query so synthesise can lead with it
+    occasion = ""
+    try:
+        raw_occ = await call_llm(
+            OCCASION_EXTRACTION_PROMPT.format(message=query),
+            tier="fast",
+            max_tokens=30,
+            temperature=0.0,
+        )
+        occasion = raw_occ.strip().strip('"').strip("'")
+    except Exception:
+        pass
+
     return {
         "search_results": [r.model_dump() for r in found],
         "sources": [r.product_id for r in found],
         "query_type": "COMPARE",
+        "occasion_context": occasion,
     }

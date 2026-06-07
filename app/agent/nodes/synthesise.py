@@ -18,7 +18,7 @@ Outgoing edge: → save_history
 import json
 import logging
 
-from app.agent.prompts import SYNTHESIS_PROMPT
+from app.agent.prompts import COMPARISON_SYNTHESIS_PROMPT, SYNTHESIS_PROMPT
 from app.agent.state import ShopSenseState
 from app.database import AsyncSessionLocal
 from app.llm import call_llm
@@ -59,6 +59,61 @@ def _format_product(r: dict, rank: int) -> str:
     if use_cases:
         lines.append("   Use cases: " + ", ".join(use_cases[:3]))
     return "\n".join(lines)
+
+
+def _build_comparison_table(products: list[dict]) -> str:
+    """
+    Build a structured attribute × product table for the COMPARISON_SYNTHESIS_PROMPT.
+    Rows = attributes; columns = products. Only rows that differ across products
+    are labelled "(same)" — still shown so the LLM has the full picture.
+    """
+    if not products:
+        return "No products found."
+
+    names = [f"{p.get('brand', '')} {p.get('name', '')}".strip() for p in products]
+    header = "Attribute         | " + " | ".join(f"{n[:22]:<22}" for n in names)
+    sep = "-" * len(header)
+    rows = [header, sep]
+
+    def row(label: str, vals: list[str]) -> str:
+        return f"{label:<18}| " + " | ".join(f"{v[:22]:<22}" for v in vals)
+
+    # Price
+    rows.append(row("Price (₹)", [
+        f"₹{p.get('current_price', 0) * _USD_TO_INR:,.0f}" for p in products
+    ]))
+
+    # Stock
+    rows.append(row("In stock", [
+        "Yes" if p.get("stock_available", True) else "⚠ Out of stock" for p in products
+    ]))
+
+    # Rating
+    rows.append(row("Rating", [f"{p.get('avg_rating', 0):.1f}/5" for p in products]))
+
+    # Fashion attributes from JSONB
+    _ATTR_KEYS = [("colour", "Colour"), ("pattern", "Pattern"),
+                  ("garment_group", "Garment group"), ("section", "Section")]
+    for key, label in _ATTR_KEYS:
+        vals = [str((p.get("attributes") or {}).get(key, "—")) for p in products]
+        if any(v != "—" for v in vals):
+            rows.append(row(label, vals))
+
+    # Sentiment scores — only if present and differing meaningfully
+    _SENT_LABELS = [
+        ("style_sentiment", "Style"),
+        ("quality_sentiment", "Quality"),
+        ("fit_sentiment", "Fit"),
+        ("comfort_sentiment", "Comfort"),
+        ("versatility_sentiment", "Versatility"),
+    ]
+    for key, label in _SENT_LABELS:
+        vals_raw = [(p.get("sentiment_scores") or {}).get(key) for p in products]
+        if any(v is not None for v in vals_raw):
+            vals = [f"{v:.1f}" if v is not None else "—" for v in vals_raw]
+            rows.append(row(label, vals))
+
+    return "\n".join(rows)
 
 
 def _build_context_block(state: ShopSenseState, query_type: str) -> str:
@@ -159,9 +214,6 @@ async def synthesise(state: ShopSenseState) -> dict:
     max_price = extracted.get("max_price")
     budget_context = f"₹{max_price:,.0f}" if max_price else "not specified"
 
-    context_block = _build_context_block(state, query_type)
-    budget_overrun_section = _build_budget_overrun_section(state)
-
     try:
         config = get_catalogue(state.get("catalogue") or "fashion")
         store_name = config.display_name
@@ -170,22 +222,43 @@ async def synthesise(state: ShopSenseState) -> dict:
         store_name = "ShopSense"
         domain_tips = ""
 
-    prompt = SYNTHESIS_PROMPT.format(
-        question=question,
-        query_type=query_type,
-        context_block=context_block,
-        budget_overrun_section=budget_overrun_section,
-        use_case=use_case,
-        budget_context=budget_context,
-        user_preferences=json.dumps(user_preferences) if user_preferences else "none",
-        domain_tips=domain_tips,
-        store_name=store_name,
-    )
+    # COMPARE gets its own structured prompt with a side-by-side attribute table
+    if query_type == "COMPARE":
+        products = (state.get("search_results") or [])[:3]
+        comparison_table = _build_comparison_table(products)
+        # occasion_context is written by compare_products from the user message;
+        # fall back to use_case from extracted_filters, then to "everyday wear"
+        compare_use_case = (
+            state.get("occasion_context")
+            or (use_case if use_case != "none" else "everyday wear")
+        )
+        prompt = COMPARISON_SYNTHESIS_PROMPT.format(
+            store_name=store_name,
+            question=question,
+            use_case=compare_use_case,
+            comparison_table=comparison_table,
+        )
+        max_tokens = 400
+    else:
+        context_block = _build_context_block(state, query_type)
+        budget_overrun_section = _build_budget_overrun_section(state)
+        prompt = SYNTHESIS_PROMPT.format(
+            question=question,
+            query_type=query_type,
+            context_block=context_block,
+            budget_overrun_section=budget_overrun_section,
+            use_case=use_case,
+            budget_context=budget_context,
+            user_preferences=json.dumps(user_preferences) if user_preferences else "none",
+            domain_tips=domain_tips,
+            store_name=store_name,
+        )
+        max_tokens = 450
 
     review_nudge = await _build_review_nudge(state)
 
     try:
-        response = await call_llm(prompt, tier="generation", max_tokens=450, temperature=0.3)
+        response = await call_llm(prompt, tier="generation", max_tokens=max_tokens, temperature=0.3)
     except Exception as exc:
         log.error("Synthesis LLM call failed: %s", exc)
         response = _FALLBACK_RESPONSE
